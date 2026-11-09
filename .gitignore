@@ -1,0 +1,6 @@
+/target/
+**/*.rs.bk
+*.log
+Infinix-Note-12-X670-13-11/
+temp_*
+*.unsparsed.img
