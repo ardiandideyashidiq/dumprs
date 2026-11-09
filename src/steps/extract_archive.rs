@@ -28,7 +28,8 @@ use crate::utils::files::{
     mark_early_extracted, register_in_memory_image,
 };
 use crate::utils::partitions::{
-    get_partition_names_with_alias, get_partition_type, PartitionType,
+    get_partition_name, get_partition_names_with_ab, get_partition_names_with_alias,
+    get_partition_type, PartitionType,
 };
 use crate::utils::progress::ByteProgress;
 
@@ -68,6 +69,23 @@ fn parse_sparsechunk_target(name: &Path, known_parts: &HashSet<String>) -> Optio
         None
     }
 }
+fn is_relevant_zip_entry(name: &Path, known_parts_ab: &HashSet<String>) -> bool {
+    let Some(fname) = name.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if fname == "payload.bin" || fname.ends_with(".tar.md5") {
+        return true;
+    }
+    if fname.starts_with("super") && !fname.contains("_empty") {
+        return true;
+    }
+    if let Some((part, _)) = fname.split_once(".img_sparsechunk.") {
+        return known_parts_ab.contains(part);
+    }
+    let stem = fname.split('.').next().unwrap_or(fname);
+    known_parts_ab.contains(stem)
+}
+
 
 struct TrackedLpPart {
     name: String,
@@ -128,6 +146,8 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         let abs_archive = fs::canonicalize(archive_path)
             .unwrap_or_else(|_| archive_path.to_path_buf());
         let known_parts: HashSet<String> = get_partition_names_with_alias().into_iter().collect();
+        let known_parts_ab: HashSet<String> = get_partition_names_with_ab().into_iter().collect();
+        let filter_unused = is_early_extract_allowed();
         let total_entries = zip.len();
         let mut total_bytes = 0u64;
         let mut dirs = HashSet::new();
@@ -140,11 +160,17 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         for i in 0..total_entries {
             let entry = zip.by_index_raw(i)?;
             let size = entry.size();
-            total_bytes += size;
             let mangled = entry.mangled_name();
+            if !entry.is_dir() && filter_unused && !is_relevant_zip_entry(&mangled, &known_parts_ab)
+            {
+                continue;
+            }
+            total_bytes += size;
             let out_path = dest_dir.join(&mangled);
             if entry.is_dir() {
-                dirs.insert(out_path);
+                if !filter_unused {
+                    dirs.insert(out_path);
+                }
             } else {
                 if let Some(parent) = out_path.parent() {
                     dirs.insert(parent.to_path_buf());
@@ -283,12 +309,12 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                         }
                     }
                     for (&entry_idx, p_indices) in &chunk_to_parts {
-                        let min_chunks = p_indices
+                        let max_chunks = p_indices
                             .iter()
                             .map(|&pi| tracked_parts[pi].remaining_chunks.load(Ordering::Relaxed))
-                            .min()
-                            .unwrap_or(999);
-                        entry_priority.insert(entry_idx, min_chunks);
+                            .max()
+                            .unwrap_or(0);
+                        entry_priority.insert(entry_idx, 100usize.saturating_sub(max_chunks));
                     }
                 }
 
@@ -429,6 +455,7 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                                                 .is_ok()
                                                 {
                                                     mark_early_extracted(tp.out_dir.clone());
+                                                    slice.release_range(tp.start, tp.end);
                                                 }
                                             }
                                         }
@@ -463,12 +490,13 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                         .is_some_and(|e| e.eq_ignore_ascii_case("img"));
 
                     if is_img
-                        && size >= 128 * 1024 * 1024
+                        && size >= 4096
                         && compression == zip::CompressionMethod::Deflated
                         && comp_end <= mmap.len()
                         && can_use_anon_mmap(size)
                     {
-                        let mut dec = DeflateDecoder::new(&mmap[start..comp_end]);
+                        let comp_slice = &mmap[start..comp_end];
+                        let mut dec = DeflateDecoder::new(comp_slice);
                         let mut head = [0u8; 64];
                         let mut got = 0usize;
                         while got < 64 {
@@ -487,71 +515,133 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                         };
                         if let Ok(mut anon) = MmapOptions::new().len(alloc_len).map_anon() {
                             let slice = SharedAnonSlice::from_mmap_mut(&mut anon);
-                            let is_super = name
+                            let fname_str = name
                                 .file_name()
                                 .and_then(|n| n.to_str())
-                                .is_some_and(|n| n.starts_with("super"));
+                                .unwrap_or("");
+                            let is_super = fname_str.starts_with("super");
                             let out_root = dest_dir.parent().map(|p| p.to_path_buf());
-                            let early_ok = is_super && is_early_extract_allowed() && out_root.is_some();
+                            let early_ok =
+                                is_super && is_early_extract_allowed() && out_root.is_some();
 
-                            let final_len = rayon::scope(|scope| -> Result<u64> {
-                                let mut parsed_lp = false;
-                                let mut pending_parts: Vec<(String, usize, usize)> = Vec::new();
-                                let mut next_idx = 0usize;
-                                extract_stream_to_anon_pipelined(
-                                    dec,
+                            let final_len = if size >= 128 * 1024 * 1024 {
+                                let (super_tx, super_rx) =
+                                    std::sync::mpsc::channel::<(String, PathBuf, usize, usize)>();
+                                std::thread::scope(|sscope| -> Result<u64> {
+                                    let super_worker = sscope.spawn(move || {
+                                        while let Ok((part_name, part_out, pstart, pend)) =
+                                            super_rx.recv()
+                                        {
+                                            info!(
+                                                partition = %part_name,
+                                                size = %HumanBytes((pend - pstart) as u64),
+                                                mode = "streaming",
+                                                "partition.extract.begin"
+                                            );
+                                            let pslice = unsafe { slice.subslice(pstart, pend) };
+                                            if extract_filesystem_slice(
+                                                pslice, &part_out, &part_name,
+                                            )
+                                            .is_ok()
+                                            {
+                                                mark_early_extracted(part_out);
+                                                slice.release_range(pstart, pend);
+                                            }
+                                        }
+                                    });
+                                    let mut parsed_lp = false;
+                                    let mut pending_parts: Vec<(String, usize, usize)> = Vec::new();
+                                    let mut next_idx = 0usize;
+                                    let decode_res = extract_stream_to_anon_pipelined(
+                                        dec,
+                                        &head[..got],
+                                        slice,
+                                        true,
+                                        &pb,
+                                        |cur_off| {
+                                            if !early_ok {
+                                                return false;
+                                            }
+                                            if !parsed_lp && cur_off >= 2 * 1024 * 1024 {
+                                                parsed_lp = true;
+                                                let meta = unsafe {
+                                                    slice.subslice(
+                                                        0,
+                                                        (2 * 1024 * 1024).min(alloc_len),
+                                                    )
+                                                };
+                                                if let Ok(parts) = parse_lp_single_extents(meta) {
+                                                    pending_parts = parts;
+                                                }
+                                            }
+                                            while next_idx < pending_parts.len() {
+                                                let (ref pname, pstart, pend) =
+                                                    pending_parts[next_idx];
+                                                if (cur_off as usize) < pend || pend > alloc_len {
+                                                    break;
+                                                }
+                                                next_idx += 1;
+                                                if get_partition_type(pname)
+                                                    == Some(PartitionType::Filesystem)
+                                                    && let Some(ref root) = out_root
+                                                {
+                                                    let _ = super_tx.send((
+                                                        pname.clone(),
+                                                        root.join(pname),
+                                                        pstart,
+                                                        pend,
+                                                    ));
+                                                }
+                                            }
+                                            parsed_lp
+                                                && !pending_parts.is_empty()
+                                                && next_idx >= pending_parts.len()
+                                        },
+                                    );
+                                    drop(super_tx);
+                                    let _ = super_worker.join();
+                                    decode_res
+                                })?
+                            } else {
+                                extract_stream_to_anon(
+                                    &mut dec,
                                     &head[..got],
                                     slice,
                                     true,
+                                    buf,
                                     &pb,
-                                    |cur_off| {
-                                        if !early_ok {
-                                            return;
-                                        }
-                                        if !parsed_lp && cur_off >= 2 * 1024 * 1024 {
-                                            parsed_lp = true;
-                                            let meta = unsafe {
-                                                slice.subslice(0, (2 * 1024 * 1024).min(alloc_len))
-                                            };
-                                            if let Ok(parts) = parse_lp_single_extents(meta) {
-                                                pending_parts = parts;
-                                            }
-                                        }
-                                        while next_idx < pending_parts.len() {
-                                            let (ref pname, pstart, pend) = pending_parts[next_idx];
-                                            if (cur_off as usize) < pend || pend > alloc_len {
-                                                break;
-                                            }
-                                            next_idx += 1;
-                                            if get_partition_type(pname)
-                                                == Some(PartitionType::Filesystem)
-                                                && let Some(ref root) = out_root
-                                            {
-                                                let part_name = pname.clone();
-                                                let part_out = root.join(&part_name);
-                                                let part_bytes = pend - pstart;
-                                                scope.spawn(move |_| {
-                                                    info!(
-                                                        partition = %part_name,
-                                                        size = %HumanBytes(part_bytes as u64),
-                                                        mode = "streaming",
-                                                        "partition.extract.begin"
-                                                    );
-                                                    let pslice =
-                                                        unsafe { slice.subslice(pstart, pend) };
-                                                    if extract_filesystem_slice(
-                                                        pslice, &part_out, &part_name,
-                                                    )
-                                                    .is_ok()
-                                                    {
-                                                        mark_early_extracted(part_out);
-                                                    }
-                                                });
-                                            }
-                                        }
-                                    },
-                                )
-                            })?;
+                                )?
+                            };
+
+                            if !is_super
+                                && is_early_extract_allowed()
+                                && let Some(ref root) = out_root
+                            {
+                                let stem = fname_str.split('.').next().unwrap_or(fname_str);
+                                let unslotted = stem
+                                    .strip_suffix("_a")
+                                    .or_else(|| stem.strip_suffix("_b"))
+                                    .unwrap_or(stem);
+                                let canonical = get_partition_name(unslotted);
+                                if get_partition_type(canonical) == Some(PartitionType::Filesystem)
+                                {
+                                    let part_out = root.join(canonical);
+                                    info!(
+                                        partition = canonical,
+                                        size = %HumanBytes(final_len),
+                                        mode = "streaming",
+                                        "partition.extract.begin"
+                                    );
+                                    let pslice =
+                                        unsafe { slice.subslice(0, final_len as usize) };
+                                    if extract_filesystem_slice(pslice, &part_out, canonical)
+                                        .is_ok()
+                                    {
+                                        mark_early_extracted(part_out);
+                                    }
+                                }
+                            }
+
                             let ro_mmap = Arc::new(anon.make_read_only()?);
                             let mem_key = PathBuf::from(format!("mem://{}", out_path.display()));
                             register_in_memory_image(mem_key.clone(), ro_mmap);

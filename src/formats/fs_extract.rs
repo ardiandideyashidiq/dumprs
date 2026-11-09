@@ -5,6 +5,7 @@ use ext4_view::{Ext4, Ext4Read};
 use indicatif::{HumanBytes, HumanDuration};
 use memmap2::Mmap;
 use rayon::prelude::*;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Write};
@@ -19,6 +20,11 @@ use crate::utils::progress::ByteProgress;
 
 const MTK_MAGIC_1: u32 = 0x5888_1688;
 const MTK_MAGIC_2: u32 = 0x5889_1689;
+thread_local! {
+    static FS_COPY_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+
 
 pub fn extract_filesystem(image_path: &Path, output_dir: &Path) -> Result<()> {
     let part_name = image_path
@@ -101,7 +107,7 @@ fn try_extract_mtk(slice: &[u8], output_dir: &Path, part_name: &str) -> Result<(
 
     let start_time = Instant::now();
     let mut pos = 0usize;
-    let mut files_extracted = 0u64;
+    let mut sections: Vec<(PathBuf, usize, usize)> = Vec::new();
     let mut bytes_extracted = 0u64;
     let mut seen_names: HashSet<String> = HashSet::new();
 
@@ -132,11 +138,9 @@ fn try_extract_mtk(slice: &[u8], output_dir: &Path, part_name: &str) -> Result<(
             let file_name = if seen_names.insert(base_name.clone()) {
                 base_name
             } else {
-                format!("{}_{}", base_name, files_extracted)
+                format!("{}_{}", base_name, sections.len())
             };
-            let out_path = output_dir.join(file_name);
-            fs::write(&out_path, &slice[data_start..data_end])?;
-            files_extracted += 1;
+            sections.push((output_dir.join(file_name), data_start, data_end));
             bytes_extracted += dsize as u64;
         }
 
@@ -144,9 +148,16 @@ fn try_extract_mtk(slice: &[u8], output_dir: &Path, part_name: &str) -> Result<(
         pos = data_start.saturating_add(aligned_dsize);
     }
 
-    if files_extracted == 0 {
+    if sections.is_empty() {
         bail!("No valid MTK sections extracted");
     }
+    let files_extracted = sections.len() as u64;
+    sections
+        .into_par_iter()
+        .try_for_each(|(out_path, start, end)| -> Result<()> {
+            fs::write(&out_path, &slice[start..end])?;
+            Ok(())
+        })?;
 
     info!(
         partition = part_name,
@@ -165,8 +176,6 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
     let fs = EroFS::new(SliceImage::new(slice))
         .map_err(|e| anyhow::anyhow!("EroFS init failed: {:?}", e))?;
     let pb = ByteProgress::new(part_name, img_size);
-    let mut created_dirs: HashSet<PathBuf> = HashSet::new();
-    created_dirs.insert(output_dir.to_path_buf());
     let mut files_to_extract = Vec::new();
     for entry in fs
         .walk_dir("/")
@@ -183,28 +192,21 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
         let target = output_dir.join(rel_path);
 
         if entry.inode.is_dir() {
-            if !created_dirs.contains(&target) {
+            if fs::create_dir(&target).is_err() {
                 fs::create_dir_all(&target)?;
-                created_dirs.insert(target);
             }
             debug!(partition = part_name, dir = rel_path, "erofs.mkdir");
         } else if entry.inode.is_file() {
-            if let Some(parent) = target.parent()
-                && !created_dirs.contains(parent)
-            {
-                fs::create_dir_all(parent)?;
-                created_dirs.insert(parent.to_path_buf());
-            }
             files_to_extract.push((entry.inode, target));
         }
     }
-
     let files_extracted = files_to_extract.len() as u64;
     let bytes_extracted = AtomicU64::new(0);
 
-    files_to_extract.into_par_iter().try_for_each_init(
-        || vec![0u8; 4 * 1024 * 1024],
-        |copy_buf, (inode, target)| -> Result<()> {
+    files_to_extract
+        .into_par_iter()
+        .with_min_len(32)
+        .try_for_each(|(inode, target)| -> Result<()> {
             let expected_size = inode.data_size() as usize;
             if expected_size == 0 {
                 File::create(&target)
@@ -216,42 +218,47 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
                 anyhow::anyhow!("Failed to open erofs file {}: {:?}", target.display(), e)
             })?;
 
-            if expected_size <= copy_buf.len() {
-                let mut filled = 0usize;
-                while filled < expected_size {
-                    let n = file.read(&mut copy_buf[filled..expected_size])?;
-                    if n == 0 {
-                        break;
-                    }
-                    filled += n;
+            FS_COPY_BUF.with(|cell| -> Result<()> {
+                let mut copy_buf = cell.borrow_mut();
+                if copy_buf.len() < 4 * 1024 * 1024 {
+                    copy_buf.resize(4 * 1024 * 1024, 0);
                 }
-                fs::write(&target, &copy_buf[..filled])
-                    .with_context(|| format!("Failed to write {}", target.display()))?;
-                let file_bytes = filled as u64;
-                bytes_extracted.fetch_add(file_bytes, Ordering::Relaxed);
-                pb.inc(file_bytes);
-            } else {
-                let out_file = File::create(&target)
-                    .with_context(|| format!("Failed to create {}", target.display()))?;
-                let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, out_file);
-                let mut file_bytes = 0u64;
-                loop {
-                    let n = file.read(copy_buf)?;
-                    if n == 0 {
-                        break;
+                if expected_size <= copy_buf.len() {
+                    let mut filled = 0usize;
+                    while filled < expected_size {
+                        let n = file.read(&mut copy_buf[filled..expected_size])?;
+                        if n == 0 {
+                            break;
+                        }
+                        filled += n;
                     }
-                    writer.write_all(&copy_buf[..n])?;
-                    file_bytes += n as u64;
+                    fs::write(&target, &copy_buf[..filled])
+                        .with_context(|| format!("Failed to write {}", target.display()))?;
+                    let file_bytes = filled as u64;
+                    bytes_extracted.fetch_add(file_bytes, Ordering::Relaxed);
+                    pb.inc(file_bytes);
+                } else {
+                    let out_file = File::create(&target)
+                        .with_context(|| format!("Failed to create {}", target.display()))?;
+                    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, out_file);
+                    let mut file_bytes = 0u64;
+                    loop {
+                        let n = file.read(&mut copy_buf)?;
+                        if n == 0 {
+                            break;
+                        }
+                        writer.write_all(&copy_buf[..n])?;
+                        file_bytes += n as u64;
+                    }
+                    writer.flush()?;
+                    bytes_extracted.fetch_add(file_bytes, Ordering::Relaxed);
+                    pb.inc(file_bytes);
                 }
-                writer.flush()?;
-                bytes_extracted.fetch_add(file_bytes, Ordering::Relaxed);
-                pb.inc(file_bytes);
-            }
+                Ok(())
+            })?;
             debug!(partition = part_name, file = %target.display(), "erofs.extract_file");
             Ok(())
-        },
-    )?;
-
+        })?;
     let bytes_extracted = bytes_extracted.load(Ordering::Relaxed);
     pb.finish();
     info!(
@@ -343,22 +350,21 @@ fn try_extract_ext4_slice(slice: &[u8], output_dir: &Path, part_name: &str) -> R
     let files_extracted = symlinks_extracted + regular_files.len() as u64;
     let bytes_extracted = AtomicU64::new(0);
 
-    regular_files.into_par_iter().try_for_each_init(
-        || Ext4::load(Box::new(reader)),
-        |local_fs, (entry_path, target)| -> Result<()> {
-            let fs_ref = local_fs
-                .as_ref()
-                .map_err(|e| anyhow::anyhow!("Ext4 thread init failed: {:?}", e))?;
-            let data = fs_ref.read(&entry_path).map_err(|e| {
-                anyhow::anyhow!("Ext4 read failed on {}: {:?}", entry_path.display(), e)
-            })?;
-            let len = data.len() as u64;
-            fs::write(&target, data)?;
-            bytes_extracted.fetch_add(len, Ordering::Relaxed);
-            pb.inc(len);
-            Ok(())
-        },
-    )?;
+    regular_files
+        .into_par_iter()
+        .with_min_len(64)
+        .try_for_each_init(
+            || Ext4::load(Box::new(reader)),
+            |local_fs, (entry_path, target)| -> Result<()> {
+                let fs_ref = local_fs
+                    .as_ref()
+                    .map_err(|e| anyhow::anyhow!("Ext4 thread init failed: {:?}", e))?;
+                let len = extract_ext4_file_buffered(fs_ref, &entry_path, &target)?;
+                bytes_extracted.fetch_add(len, Ordering::Relaxed);
+                pb.inc(len);
+                Ok(())
+            },
+        )?;
 
     let bytes_extracted = bytes_extracted.load(Ordering::Relaxed);
     pb.finish();
@@ -404,23 +410,22 @@ fn try_extract_ext4(
     let files_extracted = symlinks_extracted + regular_files.len() as u64;
     let bytes_extracted = AtomicU64::new(0);
 
-    regular_files.into_par_iter().try_for_each_init(
-        || Ext4::load(Box::new(reader.clone())),
-        |local_fs, (entry_path, target)| -> Result<()> {
-            let fs_ref = local_fs
-                .as_ref()
-                .map_err(|e| anyhow::anyhow!("Ext4 thread init failed: {:?}", e))?;
-            let data = fs_ref.read(&entry_path).map_err(|e| {
-                anyhow::anyhow!("Ext4 read failed on {}: {:?}", entry_path.display(), e)
-            })?;
-            let len = data.len() as u64;
-            fs::write(&target, data)?;
-            bytes_extracted.fetch_add(len, Ordering::Relaxed);
-            pb.inc(len);
-            debug!(partition = part_name, file = %entry_path.display(), "ext4.extract_file");
-            Ok(())
-        },
-    )?;
+    regular_files
+        .into_par_iter()
+        .with_min_len(64)
+        .try_for_each_init(
+            || Ext4::load(Box::new(reader.clone())),
+            |local_fs, (entry_path, target)| -> Result<()> {
+                let fs_ref = local_fs
+                    .as_ref()
+                    .map_err(|e| anyhow::anyhow!("Ext4 thread init failed: {:?}", e))?;
+                let len = extract_ext4_file_buffered(fs_ref, &entry_path, &target)?;
+                bytes_extracted.fetch_add(len, Ordering::Relaxed);
+                pb.inc(len);
+                debug!(partition = part_name, file = %entry_path.display(), "ext4.extract_file");
+                Ok(())
+            },
+        )?;
 
     let bytes_extracted = bytes_extracted.load(Ordering::Relaxed);
     pb.finish();
@@ -434,6 +439,66 @@ fn try_extract_ext4(
     );
     Ok(())
 }
+fn extract_ext4_file_buffered(
+    fs_ref: &Ext4,
+    entry_path: &ext4_view::PathBuf,
+    target: &Path,
+) -> Result<u64> {
+    let mut file = fs_ref
+        .open(entry_path)
+        .map_err(|e| anyhow::anyhow!("Ext4 open failed on {}: {:?}", entry_path.display(), e))?;
+    let expected_size = file.metadata().len() as usize;
+    if expected_size == 0 {
+        File::create(target)
+            .with_context(|| format!("Failed to create {}", target.display()))?;
+        return Ok(0);
+    }
+    FS_COPY_BUF.with(|cell| -> Result<u64> {
+        let mut copy_buf = cell.borrow_mut();
+        let buf_target = expected_size.min(32 * 1024 * 1024).max(4 * 1024 * 1024);
+        if copy_buf.len() < buf_target {
+            copy_buf.resize(buf_target, 0);
+        }
+        if expected_size <= copy_buf.len() {
+            let mut filled = 0usize;
+            while filled < expected_size {
+                let n = file.read(&mut copy_buf[filled..expected_size])?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            fs::write(target, &copy_buf[..filled])
+                .with_context(|| format!("Failed to write {}", target.display()))?;
+            Ok(filled as u64)
+        } else {
+            let out_file = File::create(target)
+                .with_context(|| format!("Failed to create {}", target.display()))?;
+            let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
+            let mut file_bytes = 0u64;
+            let mut filled = 0usize;
+            loop {
+                let n = file.read(&mut copy_buf[filled..])?;
+                if n == 0 {
+                    if filled > 0 {
+                        writer.write_all(&copy_buf[..filled])?;
+                        file_bytes += filled as u64;
+                    }
+                    break;
+                }
+                filled += n;
+                if filled == copy_buf.len() {
+                    writer.write_all(&copy_buf)?;
+                    file_bytes += filled as u64;
+                    filled = 0;
+                }
+            }
+            writer.flush()?;
+            Ok(file_bytes)
+        }
+    })
+}
+
 
 fn collect_ext4_entries(
     fs: &Ext4,

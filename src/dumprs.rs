@@ -44,6 +44,22 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
         .unwrap_or(false);
     let should_skip_prepare = options.skip_prepare || (options.resume && has_raw_files);
 
+    if !should_skip_extract
+        && !should_skip_prepare
+        && !options.resume
+        && options.partitions.is_empty()
+        && let Ok(entries) = fs::read_dir(output_path)
+    {
+        let stale_dir = raw_images_path.join(".stale");
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name();
+            if name != "temp_extracted_archive" && name != "temp_raw_images" {
+                let _ = fs::create_dir_all(&stale_dir);
+                let _ = fs::rename(entry.path(), stale_dir.join(&name));
+            }
+        }
+    }
+
     set_allow_early_extract(options.partitions.is_empty() && !options.skip_prepare);
     let run_res = (|| -> Result<()> {
         if should_skip_extract {

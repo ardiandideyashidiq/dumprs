@@ -84,6 +84,33 @@ impl SharedAnonSlice {
         Self { ptr, len }
     }
 
+    pub fn release_range(&self, start: usize, end: usize) {
+        #[cfg(target_os = "linux")]
+        {
+            const HPAGE_MASK: usize = (2 * 1024 * 1024) - 1;
+            let page_start = (start + HPAGE_MASK) & !HPAGE_MASK;
+            let page_end = end.min(self.len) & !HPAGE_MASK;
+            if page_end > page_start {
+                unsafe extern "C" {
+                    fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
+                }
+                const MADV_DONTNEED: i32 = 4;
+                unsafe {
+                    let _ = madvise(
+                        self.ptr.add(page_start).cast(),
+                        page_end - page_start,
+                        MADV_DONTNEED,
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (start, end);
+        }
+    }
+
+
     /// # Safety
     /// Caller must ensure `start..end` has already been completely written and is no longer mutated.
     #[inline]
@@ -110,13 +137,14 @@ impl SharedAnonSlice {
     }
 
     #[inline]
-    pub fn read_exact_at<R: Read>(
+    pub fn read_exact_at<R: Read, F: FnMut(u64) -> bool>(
         &self,
         reader: &mut R,
         offset: u64,
         len: usize,
         pb: &ByteProgress,
-    ) -> Result<()> {
+        on_offset: &mut F,
+    ) -> Result<bool> {
         let start = offset as usize;
         let end = start
             .checked_add(len)
@@ -127,6 +155,7 @@ impl SharedAnonSlice {
         // SAFETY: `start..end` is within `0..self.len` and exclusively owned by this chunk.
         let dst = unsafe { std::slice::from_raw_parts_mut(self.ptr.add(start), len) };
         let mut filled = 0usize;
+        let mut next_notify = (4 * 1024 * 1024).min(len);
         while filled < len {
             let step = (len - filled).min(4 * 1024 * 1024);
             let n = reader.read(&mut dst[filled..filled + step])?;
@@ -135,8 +164,14 @@ impl SharedAnonSlice {
             }
             filled += n;
             pb.inc(n as u64);
+            if filled >= next_notify {
+                if on_offset(offset + filled as u64) {
+                    return Ok(true);
+                }
+                next_notify = (filled + 4 * 1024 * 1024).min(len);
+            }
         }
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -919,11 +954,11 @@ pub fn extract_stream_to_anon_pipelined<R, F>(
 ) -> Result<u64>
 where
     R: Read + Send,
-    F: FnMut(u64) + Send,
+    F: FnMut(u64) -> bool + Send,
 {
     const CHUNK_CAP: usize = 2 * 1024 * 1024;
-    let (data_tx, data_rx) = mpsc::sync_channel::<Vec<u8>>(8);
-    let (recycle_tx, recycle_rx) = mpsc::sync_channel::<Vec<u8>>(8);
+    let (data_tx, data_rx) = mpsc::sync_channel::<Vec<u8>>(12);
+    let (recycle_tx, recycle_rx) = mpsc::sync_channel::<Vec<u8>>(12);
     let initial_vec = initial.to_vec();
 
     std::thread::scope(|s| -> Result<u64> {
@@ -986,10 +1021,10 @@ pub fn extract_stream_to_anon<R: Read>(
     buf: &mut [u8],
     pb: &ByteProgress,
 ) -> Result<u64> {
-    extract_stream_to_anon_with_cb(reader, initial, target, try_sparse, buf, pb, |_| {})
+    extract_stream_to_anon_with_cb(reader, initial, target, try_sparse, buf, pb, |_| false)
 }
 
-pub fn extract_stream_to_anon_with_cb<R: Read, F: FnMut(u64)>(
+pub fn extract_stream_to_anon_with_cb<R: Read, F: FnMut(u64) -> bool>(
     reader: &mut R,
     initial: &[u8],
     target: SharedAnonSlice,
@@ -1096,7 +1131,10 @@ pub fn extract_stream_to_anon_with_cb<R: Read, F: FnMut(u64)>(
                     pb.inc(avail as u64);
                 }
                 if rem > 0 {
-                    target.read_exact_at(reader, out_offset, rem, pb)?;
+                    if target.read_exact_at(reader, out_offset, rem, pb, &mut on_offset)? {
+                        out_offset += rem as u64;
+                        break;
+                    }
                     out_offset += rem as u64;
                 }
             }
@@ -1147,7 +1185,9 @@ pub fn extract_stream_to_anon_with_cb<R: Read, F: FnMut(u64)>(
             }
             other => bail!("Unknown sparse chunk type 0x{:04x}", other),
         }
-        on_offset(out_offset);
+        if on_offset(out_offset) {
+            break;
+        }
     }
 
     Ok((hdr.total_blks * hdr.blk_sz).max(out_offset))

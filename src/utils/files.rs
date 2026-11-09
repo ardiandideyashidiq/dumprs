@@ -50,7 +50,7 @@ pub fn available_ram_bytes() -> u64 {
 }
 
 pub fn can_use_anon_mmap(needed_bytes: u64) -> bool {
-    if needed_bytes < 32 * 1024 * 1024 {
+    if needed_bytes < 4096 {
         return false;
     }
     let avail = available_ram_bytes();
