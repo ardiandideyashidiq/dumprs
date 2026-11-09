@@ -49,13 +49,11 @@ pub fn prepare_sparsed_images(files_path: &Path) -> Result<()> {
             sparsechunk_files.sort_by_key(|(k, _)| *k);
             let chunk_paths: Vec<_> = sparsechunk_files.into_iter().map(|(_, p)| p).collect();
 
-            info!("Preparing sparsechunk images for {}", partition);
             info!(
-                "Converting {} to {}",
-                chunk_paths[0].display(),
-                output_image.display()
+                partition = %partition,
+                chunks = chunk_paths.len(),
+                "sparsechunks.prepare"
             );
-
             unsparse_chunks(&chunk_paths, &output_image)?;
         }
         Ok(())

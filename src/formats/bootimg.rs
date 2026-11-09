@@ -1,12 +1,13 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::GzDecoder;
-use memmap2::Mmap;
 use std::borrow::Cow;
-use std::fs::{self, File};
+use std::fs;
 use std::io::Read;
 use std::path::Path;
 use tracing::info;
+
+use crate::utils::files::resolve_image_mmap;
 const BOOT_MAGIC: &[u8; 8] = b"ANDROID!";
 const VENDOR_BOOT_MAGIC: &[u8; 8] = b"VNDRBOOT";
 
@@ -47,10 +48,8 @@ fn align_to(val: u64, align: u64) -> u64 {
 }
 
 pub fn extract_bootimg(image_path: &Path, output_path: &Path) -> Result<()> {
-    let file = File::open(image_path)
-        .with_context(|| format!("Failed to open boot image {}", image_path.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("Failed to mmap boot image {}", image_path.display()))?;
+    let (full_mmap, start, end) = resolve_image_mmap(image_path)?;
+    let mmap = &full_mmap[start..end];
 
     if mmap.len() < 8 {
         bail!("Boot image too small: {}", image_path.display());
@@ -60,9 +59,9 @@ pub fn extract_bootimg(image_path: &Path, output_path: &Path) -> Result<()> {
     fs::create_dir_all(output_path)?;
 
     if magic == BOOT_MAGIC {
-        extract_standard_bootimg(&mmap, output_path)?;
+        extract_standard_bootimg(mmap, output_path)?;
     } else if magic == VENDOR_BOOT_MAGIC {
-        extract_vendor_bootimg(&mmap, output_path)?;
+        extract_vendor_bootimg(mmap, output_path)?;
     } else {
         bail!("Unknown boot image magic: {:?}", magic);
     }
@@ -152,7 +151,7 @@ fn extract_standard_bootimg(mmap: &[u8], output_path: &Path) -> Result<()> {
         let end = start + kernel_size as usize;
         if end <= mmap.len() {
             fs::write(output_path.join("kernel"), &mmap[start..end])?;
-            info!("Extracted kernel ({} bytes)", kernel_size);
+            info!(size = kernel_size, "bootimg.kernel.extracted");
         }
     }
 
@@ -163,7 +162,7 @@ fn extract_standard_bootimg(mmap: &[u8], output_path: &Path) -> Result<()> {
             let buf = &mmap[start..end];
             fs::write(output_path.join("ramdisk.img"), buf)?;
             extract_ramdisk(buf, &output_path.join("ramdisk"));
-            info!("Extracted ramdisk ({} bytes)", ramdisk_size);
+            info!(size = ramdisk_size, "bootimg.ramdisk.extracted");
         }
     }
 

@@ -1,10 +1,13 @@
 use anyhow::{bail, Context, Result};
+use indicatif::HumanBytes;
 use memmap2::Mmap;
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use tracing::{debug, info};
+
+use crate::utils::progress::ByteProgress;
 
 const BLOCK_SIZE: u64 = 4096;
 const SMALL_GAP_THRESHOLD: u64 = 64 * 1024;
@@ -67,8 +70,8 @@ fn parse_transfer_list(path: &Path) -> Result<(u32, u64, u64, Vec<(u64, u64)>)> 
         .context("Invalid transfer.list new_blocks")?;
 
     if version >= 2 {
-        let _ = lines.next(); // stash entries
-        let _ = lines.next(); // max stashed blocks
+        let _ = lines.next();
+        let _ = lines.next();
     }
 
     let mut new_ranges = Vec::with_capacity(64);
@@ -89,7 +92,7 @@ fn parse_transfer_list(path: &Path) -> Result<(u32, u64, u64, Vec<(u64, u64)>)> 
                 parse_rangeset_into(range_arg, cmd == "new", &mut new_ranges, &mut max_block)?;
             }
         } else if !cmd.as_bytes().first().map(|b| b.is_ascii_digit()).unwrap_or(false) {
-            debug!("Unknown command in transfer.list: {}", cmd);
+            debug!(command = cmd, "sdat2img.unknown_command");
         }
     }
 
@@ -158,9 +161,7 @@ pub fn sdat2img(
     new_data_path: &Path,
     output_img_path: &Path,
 ) -> Result<()> {
-    let (version, _new_blocks, max_block, new_ranges) = parse_transfer_list(transfer_list_path)?;
-    info!("sdat2img: detected transfer list version {}", version);
-
+    let (version, new_blocks, max_block, new_ranges) = parse_transfer_list(transfer_list_path)?;
     let max_file_size = max_block * BLOCK_SIZE;
 
     let mut new_data_file = File::open(new_data_path)
@@ -214,11 +215,28 @@ pub fn sdat2img(
                 if output_file.metadata().map(|m| m.len()).unwrap_or(0) != max_file_size {
                     output_file.set_len(max_file_size)?;
                 }
-                info!("sdat2img: output image written to {}", output_img_path.display());
+                debug!(
+                    version,
+                    output = %output_img_path.display(),
+                    size = %HumanBytes(max_file_size),
+                    "sdat2img.done"
+                );
                 Ok(())
             })
         });
     }
+
+    let label = output_img_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("sdat2img");
+    info!(
+        image = label,
+        version,
+        size = %HumanBytes(max_file_size),
+        "sdat2img.start"
+    );
+    let pb = ByteProgress::new(label, new_blocks * BLOCK_SIZE);
 
     let mmap = unsafe { Mmap::map(&new_data_file) }
         .with_context(|| format!("Failed to mmap new data file {}", new_data_path.display()))?;
@@ -248,13 +266,15 @@ pub fn sdat2img(
         write_at(&output_file, &mmap[src_offset..src_offset + byte_count], target_pos)?;
         src_offset += byte_count;
         max_written = max_written.max(target_pos + byte_count as u64);
+        pb.inc(byte_count as u64);
     }
 
     if max_written < max_file_size {
         output_file.set_len(max_file_size)?;
     }
 
-    info!("sdat2img: output image written to {}", output_img_path.display());
+    pb.finish();
+    info!(image = label, size = %HumanBytes(max_file_size), "sdat2img.done");
     Ok(())
 }
 
@@ -263,10 +283,22 @@ pub fn sdat2img_from_reader<R: Read>(
     new_data_reader: &mut R,
     output_img_path: &Path,
 ) -> Result<()> {
-    let (version, _new_blocks, max_block, new_ranges) = parse_transfer_list(transfer_list_path)?;
-    info!("sdat2img: detected transfer list version {}", version);
-
+    let (version, new_blocks, max_block, new_ranges) = parse_transfer_list(transfer_list_path)?;
     let max_file_size = max_block * BLOCK_SIZE;
+
+    let label = output_img_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("sdat2img");
+    if max_file_size >= FAST_MEM_LIMIT {
+        info!(
+            image = label,
+            version,
+            size = %HumanBytes(max_file_size),
+            "sdat2img.stream.start"
+        );
+    }
+    let pb = ByteProgress::new(label, new_blocks * BLOCK_SIZE);
 
     let output_file = OpenOptions::new()
         .read(true)
@@ -291,6 +323,7 @@ pub fn sdat2img_from_reader<R: Read>(
             output_img.write_all(&buf[..to_read])?;
             remaining_bytes -= to_read as u64;
             current_pos += to_read as u64;
+            pb.inc(to_read as u64);
         }
     }
 
@@ -300,6 +333,9 @@ pub fn sdat2img_from_reader<R: Read>(
         inner_file.set_len(max_file_size)?;
     }
 
-    info!("sdat2img: output image written to {}", output_img_path.display());
+    pb.finish();
+    if max_file_size >= FAST_MEM_LIMIT {
+        info!(image = label, size = %HumanBytes(max_file_size), "sdat2img.stream.done");
+    }
     Ok(())
 }

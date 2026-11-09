@@ -8,10 +8,13 @@ use tracing::info;
 use walkdir::WalkDir;
 
 use crate::steps::extract_archive::extract_archive;
-use crate::steps::extract_images::extract_images;
+use crate::steps::extract_images::extract_images_with_cleanup;
 use crate::steps::prepare_images::prepare_images;
-use crate::utils::files::{rmtree_recursive, sort_files};
+use crate::utils::files::{
+    clear_in_memory_images, rmtree_recursive, set_allow_early_extract, sort_files,
+};
 use crate::utils::partitions::get_partition_names;
+
 #[derive(Debug, Clone, Default)]
 pub struct DumpOptions {
     pub debug: bool,
@@ -41,31 +44,60 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
         .unwrap_or(false);
     let should_skip_prepare = options.skip_prepare || (options.resume && has_raw_files);
 
+    set_allow_early_extract(options.partitions.is_empty() && !options.skip_prepare);
     let run_res = (|| -> Result<()> {
         if should_skip_extract {
             info!(
-                "[RESUME] Found extracted files in {}, skipping Step 1 archive extraction",
-                extracted_archive_path.display()
+                step = 1,
+                dir = %extracted_archive_path.display(),
+                "step.extract_archive.skipped"
             );
         } else {
-            info!("Step 1 - Extracting archive");
+            let step_start = Instant::now();
+            info!(step = 1, archive = %file.display(), "step.extract_archive.start");
             extract_archive(file, &extracted_archive_path, false)?;
+            info!(
+                step = 1,
+                duration = %HumanDuration(step_start.elapsed()),
+                "step.extract_archive.done"
+            );
         }
 
         if should_skip_prepare {
             info!(
-                "[RESUME] Found raw partition images in {}, skipping Step 2 image preparation",
-                raw_images_path.display()
+                step = 2,
+                dir = %raw_images_path.display(),
+                "step.prepare_images.skipped"
             );
         } else {
-            info!("Step 2 - Preparing partition images");
+            let step_start = Instant::now();
+            info!(step = 2, "step.prepare_images.start");
             prepare_images(&extracted_archive_path, &raw_images_path)?;
+            info!(
+                step = 2,
+                duration = %HumanDuration(step_start.elapsed()),
+                "step.prepare_images.done"
+            );
         }
 
-        info!("Step 3 - Extracting partitions");
-        extract_images(&raw_images_path, output_path, &options.partitions, options.resume)?;
-
-        // Make sure system folder exists and it's not empty (unless user filtered partitions)
+        let cleanup_temp = !options.debug && !options.resume;
+        let step_start = Instant::now();
+        info!(step = 3, "step.extract_partitions.start");
+        extract_images_with_cleanup(
+            &raw_images_path,
+            output_path,
+            &options.partitions,
+            options.resume,
+            cleanup_temp,
+        )?;
+        info!(
+            step = 3,
+            duration = %HumanDuration(step_start.elapsed()),
+            "step.extract_partitions.done"
+        );
+        if cleanup_temp {
+            clear_in_memory_images();
+        }
         if options.partitions.is_empty() || options.partitions.iter().any(|p| p == "system") {
             let system_dir = output_path.join("system");
             if !system_dir.exists() {
@@ -78,109 +110,135 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
             }
         }
 
-        info!("Step 4 - Finalizing");
+        info!(step = 4, "step.finalize.start");
         Ok(())
     })();
 
     // Propagate failure BEFORE cleanup: on error, NEVER delete temporary files so user can resume with -r
     run_res?;
-
-    // Only clean up temporary directories on SUCCESS, and only if neither debug nor resume is enabled
     if !options.debug && !options.resume {
-        if extracted_archive_path.exists() {
-            let _ = rmtree_recursive(&extracted_archive_path);
-        }
-        if raw_images_path.exists() {
-            let _ = rmtree_recursive(&raw_images_path);
-        }
+        clear_in_memory_images();
     }
 
-    // Single-pass walk to collect files for all_files.txt and summary statistics
+    let finalize_start = Instant::now();
+    let cleanup_temp = !options.debug && !options.resume;
     let mut files_list = Vec::new();
     let mut total_bytes = 0u64;
     let mut part_stats: HashMap<String, (usize, u64)> = HashMap::new();
-
-    let walker = WalkDir::new(output_path).into_iter().filter_entry(|e| {
-        if e.depth() == 1 && e.file_type().is_dir() {
-            let name = e.file_name();
-            name != "temp_extracted_archive" && name != "temp_raw_images"
-        } else {
-            true
-        }
-    });
-
-    for entry in walker.filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() {
-            let path = entry.path();
-            if let Ok(rel) = path.strip_prefix(output_path) {
-                if rel == Path::new("all_files.txt") {
-                    continue;
-                }
-                let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                total_bytes += len;
-                if let Some(std::path::Component::Normal(top)) = rel.components().next()
-                    && rel.components().count() > 1
-                    && let Some(top_str) = top.to_str()
-                {
-                    let stat = part_stats.entry(top_str.to_string()).or_insert((0, 0));
-                    stat.0 += 1;
-                    stat.1 += len;
-                }
-                files_list.push(rel.to_path_buf());
+    rayon::join(
+        || {
+            if cleanup_temp {
+                rayon::join(
+                    || {
+                        if extracted_archive_path.exists() {
+                            let _ = rmtree_recursive(&extracted_archive_path);
+                        }
+                    },
+                    || {
+                        if raw_images_path.exists() {
+                            let _ = rmtree_recursive(&raw_images_path);
+                        }
+                    },
+                );
             }
-        }
-    }
+        },
+        || {
+            let walker = WalkDir::new(output_path).into_iter().filter_entry(|e| {
+                if e.depth() == 1 && e.file_type().is_dir() {
+                    let name = e.file_name();
+                    name != "temp_extracted_archive" && name != "temp_raw_images"
+                } else {
+                    true
+                }
+            });
 
-    sort_files(&mut files_list);
+            for entry in walker.filter_map(|e| e.ok()) {
+                if entry.file_type().is_file() {
+                    let path = entry.path();
+                    if let Ok(rel) = path.strip_prefix(output_path) {
+                        if rel == Path::new("all_files.txt") {
+                            continue;
+                        }
+                        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        total_bytes += len;
+                        let mut comps = rel.components();
+                        if let (Some(std::path::Component::Normal(top)), Some(_)) =
+                            (comps.next(), comps.next())
+                            && let Some(top_str) = top.to_str()
+                        {
+                            if let Some(stat) = part_stats.get_mut(top_str) {
+                                stat.0 += 1;
+                                stat.1 += len;
+                            } else {
+                                part_stats.insert(top_str.to_string(), (1, len));
+                            }
+                        }
+                        files_list.push(rel.to_path_buf());
+                    }
+                }
+            }
 
-    info!("Creating all_files.txt");
+            sort_files(&mut files_list);
+        },
+    );
     let mut content = String::with_capacity(files_list.len() * 40);
     for f in &files_list {
         content.push_str(&f.to_string_lossy());
         content.push('\n');
     }
     fs::write(output_path.join("all_files.txt"), content)?;
+    info!(
+        step = 4,
+        duration = %HumanDuration(finalize_start.elapsed()),
+        "step.finalize.done"
+    );
 
-    // Display summary statistics
-    print_summary(output_path, start_time.elapsed(), files_list.len(), total_bytes, &part_stats);
+    log_summary(
+        output_path,
+        start_time.elapsed(),
+        files_list.len(),
+        total_bytes,
+        &part_stats,
+    );
 
     Ok(output_path.to_path_buf())
 }
 
-fn print_summary(
+fn log_summary(
     output_path: &Path,
     duration: std::time::Duration,
     total_files: usize,
     total_bytes: u64,
     part_stats: &HashMap<String, (usize, u64)>,
 ) {
-    println!("\n{}", "=".repeat(70));
-    println!("{:^70}", "Dumprs Extraction Summary");
-    println!("{}", "=".repeat(70));
-    println!("  Duration:           {}", HumanDuration(duration));
-    println!("  Total Files:        {}", total_files);
-    println!("  Total Extracted:    {}", HumanBytes(total_bytes));
-    println!("  Output Directory:   {}", output_path.display());
-    println!("{}", "-".repeat(70));
-    println!("  Partition Breakdown:");
-
     for partition in get_partition_names() {
         if let Some(&(count, dir_bytes)) = part_stats.get(partition) {
-            println!(
-                "    - {:<16} {} ({} files)",
+            info!(
                 partition,
-                HumanBytes(dir_bytes),
-                count
+                size = %HumanBytes(dir_bytes),
+                files = count,
+                "partition.summary"
             );
         } else {
             let part_img = output_path.join(format!("{}.img", partition));
-            if let Ok(meta) = fs::metadata(&part_img) && meta.is_file() {
-                println!("    - {:<16} {} (raw image)", partition, HumanBytes(meta.len()));
+            if let Ok(meta) = fs::metadata(&part_img)
+                && meta.is_file()
+            {
+                info!(
+                    partition,
+                    size = %HumanBytes(meta.len()),
+                    kind = "raw_image",
+                    "partition.summary"
+                );
             }
         }
     }
 
-    println!("{}", "-".repeat(70));
-    println!("  Manifest:           all_files.txt generated ({} entries)", total_files);
-    println!("{}\n", "=".repeat(70));
+    info!(
+        duration = %HumanDuration(duration),
+        files = total_files,
+        size = %HumanBytes(total_bytes),
+        output = %output_path.display(),
+        "dump.complete"
+    );
 }

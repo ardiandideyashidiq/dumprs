@@ -6,32 +6,23 @@ use std::path::Path;
 
 use crate::formats::liblp::lpunpack;
 use crate::formats::payload::extract_android_ota_payload;
-use crate::formats::sparse::unsparse_file;
 pub fn extract_payload(image: &Path, output_dir: &Path) -> Result<()> {
-    extract_android_ota_payload(image, output_dir)
+    extract_android_ota_payload(image, output_dir)?;
+    let _ = fs::remove_file(image);
+    Ok(())
 }
 
 pub fn extract_super(image: &Path, output_dir: &Path) -> Result<()> {
-    let unsparsed_super = output_dir.join("super.unsparsed.img");
-
-    match unsparse_file(image, &unsparsed_super) {
-        Ok(true) if unsparsed_super.is_file() => {
-            let _ = fs::remove_file(image);
-            let res = lpunpack(&unsparsed_super, output_dir);
-            let _ = fs::remove_file(&unsparsed_super);
-            res?;
-            return Ok(());
-        }
-        _ => {
-            if unsparsed_super.is_file() {
-                let _ = fs::remove_file(&unsparsed_super);
-            }
-        }
+    let backing_path = output_dir.join(".super_backing.img");
+    let target = if fs::rename(image, &backing_path).is_ok() {
+        backing_path.as_path()
+    } else {
+        image
+    };
+    lpunpack(target, output_dir)?;
+    if target == image {
+        let _ = fs::remove_file(image);
     }
-
-    lpunpack(image, output_dir)?;
-    let _ = fs::remove_file(image);
-
     Ok(())
 }
 

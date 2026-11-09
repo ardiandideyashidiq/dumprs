@@ -1,12 +1,16 @@
 use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
+use indicatif::HumanBytes;
 use memmap2::Mmap;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use tracing::{debug, info};
+
+use crate::utils::progress::ByteProgress;
+
 const KDZ_V0: &[u8; 8] = b"\x28\x05\x00\x00\x34\x31\x25\x80";
 const KDZ_V1: &[u8; 8] = b"\x18\x05\x00\x00\x32\x79\x44\x50";
 const KDZ_V2: &[u8; 8] = b"\x28\x05\x00\x00\x24\x38\x22\x25";
@@ -61,12 +65,18 @@ pub fn unpack_kdz(filename: &Path, work_dir: &Path) -> Result<()> {
         }
     }
 
-    info!("Found {} KDZ partitions", entries.len());
+    let total_bytes: u64 = entries.iter().map(|e| e.length).sum();
+    info!(
+        entries = entries.len(),
+        size = %HumanBytes(total_bytes),
+        "kdz.extract.start"
+    );
+    let pb = ByteProgress::new("kdz", total_bytes);
     let mut dz_files = Vec::new();
 
     for entry in entries {
         let out_file_path = work_dir.join(&entry.name);
-        info!("Extracting KDZ entry {} ({} bytes)", entry.name, entry.length);
+        debug!(entry = %entry.name, size = %HumanBytes(entry.length), "kdz.entry.extract");
 
         let start = entry.offset as usize;
         let end = start.saturating_add(entry.length as usize);
@@ -76,11 +86,13 @@ pub fn unpack_kdz(filename: &Path, work_dir: &Path) -> Result<()> {
         let mut out_file = File::create(&out_file_path)
             .with_context(|| format!("Failed to create {}", out_file_path.display()))?;
         out_file.write_all(&mmap[start..end])?;
+        pb.inc(entry.length);
 
         if entry.name.ends_with(".dz") {
             dz_files.push(out_file_path);
         }
     }
+    pb.finish();
 
     if let Some(dz_path) = dz_files.first() {
         unpack_dz(dz_path, work_dir)?;
@@ -111,10 +123,11 @@ pub fn unpack_dz(filename: &Path, work_dir: &Path) -> Result<()> {
     }
 
     let chunk_count = (&header_buf[192..196]).read_u32::<LittleEndian>()?;
-    debug!("DZ chunk count: {}", chunk_count);
+    debug!(chunks = chunk_count, "dz.header");
 
     let mut chunks = Vec::with_capacity(chunk_count as usize);
     let mut pos = 512usize;
+    let mut total_input_bytes = 0u64;
     for _ in 0..chunk_count {
         if pos + 512 > mmap.len() {
             bail!("Unexpected EOF reading DZ chunk headers");
@@ -136,6 +149,7 @@ pub fn unpack_dz(filename: &Path, work_dir: &Path) -> Result<()> {
         cursor.read_exact(&mut _md5)?;
         let target_addr = cursor.read_u32::<LittleEndian>()?;
 
+        total_input_bytes += data_size as u64;
         chunks.push(DzChunk {
             slice_name,
             data_size,
@@ -143,6 +157,12 @@ pub fn unpack_dz(filename: &Path, work_dir: &Path) -> Result<()> {
         });
     }
 
+    info!(
+        chunks = chunk_count,
+        input_size = %HumanBytes(total_input_bytes),
+        "dz.extract.start"
+    );
+    let pb = ByteProgress::new("dz", total_input_bytes);
     let mut open_files: HashMap<String, File> = HashMap::new();
     let mut decompressed = Vec::with_capacity(256 * 1024);
 
@@ -184,8 +204,10 @@ pub fn unpack_dz(filename: &Path, work_dir: &Path) -> Result<()> {
         let offset = (chunk.target_addr as u64) * 512;
         out_file.seek(SeekFrom::Start(offset))?;
         out_file.write_all(payload)?;
+        pb.inc(data_len as u64);
     }
 
+    pb.finish();
     for (_, mut f) in open_files {
         let _ = f.flush();
     }

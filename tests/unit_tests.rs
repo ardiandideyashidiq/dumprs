@@ -356,5 +356,36 @@ fn test_liblp_super_unpacking() {
     assert_eq!(vendor_data.len(), 1024);
     assert_eq!(&vendor_data[0..8], b"VENDOROK");
 
+    // Also verify direct sparse super.img unpacking without intermediate unsparse file:
+    // Chunk 0: DONT_CARE 1 block (4096 bytes), Chunk 1: RAW 7 blocks (28672 bytes)
+    let sparse_super_path = temp_dir.join("super_sparse.img");
+    let sparse_out_dir = temp_dir.join("super_sparse_out");
+    let mut sparse_super = Vec::new();
+    sparse_super.extend_from_slice(&0xed26_ff3au32.to_le_bytes());
+    sparse_super.extend_from_slice(&1u16.to_le_bytes());
+    sparse_super.extend_from_slice(&0u16.to_le_bytes());
+    sparse_super.extend_from_slice(&28u16.to_le_bytes());
+    sparse_super.extend_from_slice(&12u16.to_le_bytes());
+    sparse_super.extend_from_slice(&4096u32.to_le_bytes());
+    sparse_super.extend_from_slice(&8u32.to_le_bytes());
+    sparse_super.extend_from_slice(&2u32.to_le_bytes());
+    sparse_super.extend_from_slice(&0u32.to_le_bytes());
+    // Chunk 0: DONT_CARE 1 block
+    sparse_super.extend_from_slice(&0xcac3u16.to_le_bytes());
+    sparse_super.extend_from_slice(&0u16.to_le_bytes());
+    sparse_super.extend_from_slice(&1u32.to_le_bytes());
+    sparse_super.extend_from_slice(&12u32.to_le_bytes());
+    // Chunk 1: RAW 7 blocks
+    sparse_super.extend_from_slice(&0xcac1u16.to_le_bytes());
+    sparse_super.extend_from_slice(&0u16.to_le_bytes());
+    sparse_super.extend_from_slice(&7u32.to_le_bytes());
+    sparse_super.extend_from_slice(&(12u32 + 7 * 4096).to_le_bytes());
+    sparse_super.extend_from_slice(&super_bytes[4096..]);
+    fs::write(&sparse_super_path, &sparse_super).unwrap();
+
+    lpunpack(&sparse_super_path, &sparse_out_dir).unwrap();
+    let sparse_vendor = fs::read(sparse_out_dir.join("vendor.img")).unwrap();
+    assert_eq!(sparse_vendor, vendor_data);
+
     let _ = fs::remove_dir_all(&temp_dir);
 }

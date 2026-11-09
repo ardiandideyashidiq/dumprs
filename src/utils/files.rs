@@ -1,9 +1,137 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use memmap2::Mmap;
 use rayon::prelude::*;
-use std::fs;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use walkdir::WalkDir;
 
+use crate::formats::payload::ZIP_SLICE_MAGIC;
+
+static BACKING_MMAPS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mmap>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static IN_MEM_IMAGES: LazyLock<Mutex<HashMap<PathBuf, Arc<Mmap>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static EARLY_EXTRACTED: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static ALLOW_EARLY_EXTRACT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_allow_early_extract(allow: bool) {
+    ALLOW_EARLY_EXTRACT.store(allow, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_early_extract_allowed() -> bool {
+    ALLOW_EARLY_EXTRACT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn mark_early_extracted(dir: PathBuf) {
+    EARLY_EXTRACTED.lock().unwrap().insert(dir);
+}
+
+pub fn was_early_extracted(dir: &Path) -> bool {
+    EARLY_EXTRACTED.lock().unwrap().contains(dir)
+}
+
+pub fn available_ram_bytes() -> u64 {
+    if let Ok(meminfo) = fs::read_to_string("/proc/meminfo") {
+        for line in meminfo.lines() {
+            if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                let kb_str = rest.trim().split_whitespace().next().unwrap_or("0");
+                if let Ok(kb) = kb_str.parse::<u64>() {
+                    return kb * 1024;
+                }
+            }
+        }
+    }
+    0
+}
+
+pub fn can_use_anon_mmap(needed_bytes: u64) -> bool {
+    if needed_bytes < 32 * 1024 * 1024 {
+        return false;
+    }
+    let avail = available_ram_bytes();
+    avail > needed_bytes.saturating_add(2 * 1024 * 1024 * 1024)
+}
+
+pub fn register_in_memory_image(key: PathBuf, mmap: Arc<Mmap>) {
+    IN_MEM_IMAGES.lock().unwrap().insert(key, mmap);
+}
+
+pub fn clear_in_memory_images() {
+    IN_MEM_IMAGES.lock().unwrap().clear();
+    BACKING_MMAPS.lock().unwrap().clear();
+    EARLY_EXTRACTED.lock().unwrap().clear();
+}
+
+pub fn logical_image_size(path: &Path) -> Option<u64> {
+    let meta = fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let len = meta.len();
+    if (32..4096).contains(&len) {
+        let mut f = File::open(path).ok()?;
+        let mut header = [0u8; 32];
+        if f.read_exact(&mut header).is_ok() && &header[..16] == ZIP_SLICE_MAGIC {
+            return Some(u64::from_le_bytes(header[24..32].try_into().unwrap()));
+        }
+    }
+    Some(len)
+}
+
+pub fn resolve_image_mmap_with_backing(path: &Path) -> Result<(Arc<Mmap>, usize, usize, PathBuf)> {
+    let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let mmap = unsafe { Mmap::map(&file) }
+        .with_context(|| format!("Failed to mmap {}", path.display()))?;
+    if mmap.len() >= 32 && &mmap[..16] == ZIP_SLICE_MAGIC {
+        let start = u64::from_le_bytes(mmap[16..24].try_into().unwrap()) as usize;
+        let len = u64::from_le_bytes(mmap[24..32].try_into().unwrap()) as usize;
+        let backing_str = std::str::from_utf8(&mmap[32..])
+            .context("Invalid UTF-8 in image slice reference")?;
+        let backing_path = PathBuf::from(backing_str);
+        if let Some(in_mem) = IN_MEM_IMAGES.lock().unwrap().get(&backing_path).cloned() {
+            let end = start.saturating_add(len);
+            if end > in_mem.len() {
+                bail!("Slice {}..{} exceeds in-memory image size", start, end);
+            }
+            return Ok((in_mem, start, end, backing_path));
+        }
+        let backing_mmap = {
+            let mut cache = BACKING_MMAPS.lock().unwrap();
+            if let Some(weak) = cache.get(&backing_path)
+                && let Some(existing) = weak.upgrade()
+            {
+                existing
+            } else {
+                let bf = File::open(&backing_path).with_context(|| {
+                    format!("Failed to open backing image {}", backing_path.display())
+                })?;
+                let bm = Arc::new(unsafe { Mmap::map(&bf) }.with_context(|| {
+                    format!("Failed to mmap backing image {}", backing_path.display())
+                })?);
+                cache.insert(backing_path.clone(), Arc::downgrade(&bm));
+                bm
+            }
+        };
+        let end = start.saturating_add(len);
+        if end > backing_mmap.len() {
+            bail!("Slice {}..{} exceeds backing image size", start, end);
+        }
+        return Ok((backing_mmap, start, end, backing_path));
+    }
+    let len = mmap.len();
+    let abs_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    Ok((Arc::new(mmap), 0, len, abs_path))
+}
+
+pub fn resolve_image_mmap(path: &Path) -> Result<(Arc<Mmap>, usize, usize)> {
+    let (mmap, start, end, _) = resolve_image_mmap_with_backing(path)?;
+    Ok((mmap, start, end))
+}
 pub fn get_recursive_files_list(dir: &Path, relative: bool) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let walker = WalkDir::new(dir).into_iter().filter_entry(|e| {
@@ -52,6 +180,15 @@ pub fn hardlink_or_copy(src: &Path, dst: &Path) -> Result<()> {
     }
     if dst.exists() {
         let _ = fs::remove_file(dst);
+    }
+    if let Ok(meta) = fs::metadata(src)
+        && (32..4096).contains(&meta.len())
+        && let Ok((mmap, start, end)) = resolve_image_mmap(src)
+        && (start > 0 || end != meta.len() as usize)
+    {
+        fs::write(dst, &mmap[start..end])
+            .with_context(|| format!("Failed to write slice to {}", dst.display()))?;
+        return Ok(());
     }
     if fs::hard_link(src, dst).is_ok() {
         return Ok(());

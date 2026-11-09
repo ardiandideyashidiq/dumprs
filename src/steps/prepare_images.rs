@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rayon::prelude::*;
 use std::path::Path;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::utils::files::get_recursive_files_list;
 use crate::utils::multipartitions::get_multipartition_rules;
@@ -26,17 +26,21 @@ pub fn prepare_images(extracted_archive_path: &Path, raw_images_path: &Path) -> 
     // Check for sparsed images
     prepare_sparsed_images(extracted_archive_path)?;
 
-    // Decompress super.img.lz4 / super.new.dat.br in-place if present before multipartition rules
-    for super_name in ["super", "super_a", "super_b"] {
-        let super_out = extracted_archive_path.join(format!("{}.img", super_name));
-        if !super_out.is_file() {
-            let _ = get_raw_image(super_name, extracted_archive_path, &super_out);
-        }
-    }
-
-    // Check for partitions
-    prepare_raw_images(extracted_archive_path, raw_images_path)?;
-
+    // Decompress super.img.lz4 / super.new.dat.br in-place concurrently with partition raw images
+    let (_, raw_res) = rayon::join(
+        || {
+            ["super", "super_a", "super_b"]
+                .par_iter()
+                .for_each(|super_name| {
+                    let super_out = extracted_archive_path.join(format!("{}.img", super_name));
+                    if !super_out.is_file() {
+                        let _ = get_raw_image(super_name, extracted_archive_path, &super_out);
+                    }
+                });
+        },
+        || prepare_raw_images(extracted_archive_path, raw_images_path),
+    );
+    raw_res?;
     // Check for multipartitions
     let files_list = get_recursive_files_list(extracted_archive_path, true);
     let rules = get_multipartition_rules();
@@ -49,13 +53,13 @@ pub fn prepare_images(extracted_archive_path: &Path, raw_images_path: &Path) -> 
             .collect();
 
         if matches.is_empty() {
-            info!("Pattern {} not found", rule.name);
+            debug!(pattern = rule.name, "multipartition.pattern.absent");
             continue;
         }
 
         for file in matches {
             let multipart_image = extracted_archive_path.join(file);
-            info!("Found multipartition image: {}", multipart_image.display());
+            info!(image = %multipart_image.display(), rule = rule.name, "multipartition.extract");
             (rule.handler)(&multipart_image, raw_images_path)?;
             had_multipartition = true;
         }
