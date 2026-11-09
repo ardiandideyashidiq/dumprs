@@ -143,6 +143,127 @@ impl SharedAnonSlice {
 pub fn peek_sparse_virtual_size(data: &[u8]) -> Result<Option<u64>> {
     Ok(parse_sparse_header(data)?.map(|hdr| hdr.total_blks * hdr.blk_sz))
 }
+
+pub fn peek_sparse_first_offset(data: &[u8]) -> Result<Option<(u64, u64)>> {
+    let Some(hdr) = parse_sparse_header(data)? else {
+        return Ok(None);
+    };
+    let vsize = hdr.total_blks * hdr.blk_sz;
+    if data.len() < hdr.file_hdr_sz + hdr.chunk_hdr_sz {
+        return Ok(Some((vsize, 0)));
+    }
+    let ch0 = &data[hdr.file_hdr_sz..hdr.file_hdr_sz + hdr.chunk_hdr_sz];
+    let chunk_type = u16::from_le_bytes(ch0[0..2].try_into().unwrap());
+    let chunk_sz = u32::from_le_bytes(ch0[4..8].try_into().unwrap()) as u64;
+    let first_off = if chunk_type == CHUNK_TYPE_DONT_CARE {
+        chunk_sz * hdr.blk_sz
+    } else {
+        0
+    };
+    Ok(Some((vsize, first_off)))
+}
+
+pub fn peek_sparse_prefix<R: Read>(mut reader: R, want_bytes: usize) -> Result<Vec<u8>> {
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut filled = 0usize;
+    while filled < 64 {
+        let n = reader.read(&mut buf[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    let Some(hdr) = parse_sparse_header(&buf[..filled])? else {
+        return Ok(Vec::new());
+    };
+    let mut pos = 0usize;
+    let ensure = |pos: &mut usize,
+                  filled: &mut usize,
+                  buf: &mut [u8],
+                  reader: &mut R,
+                  need: usize|
+     -> Result<()> {
+        if *filled - *pos >= need {
+            return Ok(());
+        }
+        let rem = *filled - *pos;
+        if *pos > 0 && rem > 0 {
+            buf.copy_within(*pos..*filled, 0);
+        }
+        *pos = 0;
+        *filled = rem;
+        while *filled < need {
+            let n = reader.read(&mut buf[*filled..])?;
+            if n == 0 {
+                bail!("Unexpected EOF in peek_sparse_prefix");
+            }
+            *filled += n;
+        }
+        Ok(())
+    };
+    ensure(&mut pos, &mut filled, &mut buf, &mut reader, hdr.file_hdr_sz)?;
+    pos += hdr.file_hdr_sz;
+
+    let mut out = Vec::with_capacity(want_bytes);
+    for _ in 0..hdr.total_chunks {
+        if out.len() >= want_bytes {
+            break;
+        }
+        ensure(&mut pos, &mut filled, &mut buf, &mut reader, hdr.chunk_hdr_sz)?;
+        let ch = &buf[pos..pos + hdr.chunk_hdr_sz];
+        let chunk_type = u16::from_le_bytes(ch[0..2].try_into().unwrap());
+        let chunk_sz = u32::from_le_bytes(ch[4..8].try_into().unwrap()) as usize;
+        let total_sz = u32::from_le_bytes(ch[8..12].try_into().unwrap()) as usize;
+        pos += hdr.chunk_hdr_sz;
+        let payload_len = total_sz.saturating_sub(hdr.chunk_hdr_sz);
+        let out_bytes = chunk_sz * (hdr.blk_sz as usize);
+        let need_out = (want_bytes - out.len()).min(out_bytes);
+
+        match chunk_type {
+            CHUNK_TYPE_RAW => {
+                let mut rem_copy = need_out;
+                let avail = (filled - pos).min(rem_copy);
+                out.extend_from_slice(&buf[pos..pos + avail]);
+                pos += avail;
+                rem_copy -= avail;
+                while rem_copy > 0 {
+                    let step = rem_copy.min(buf.len());
+                    let n = reader.read(&mut buf[..step])?;
+                    if n == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&buf[..n]);
+                    rem_copy -= n;
+                }
+                let mut skip = payload_len.saturating_sub(need_out);
+                let avail_skip = (filled - pos).min(skip);
+                pos += avail_skip;
+                skip -= avail_skip;
+                while skip > 0 {
+                    let max_skip = skip.min(buf.len());
+                    let n = reader.read(&mut buf[..max_skip])?;
+                    if n == 0 {
+                        break;
+                    }
+                    skip -= n;
+                }
+            }
+            CHUNK_TYPE_FILL => {
+                ensure(&mut pos, &mut filled, &mut buf, &mut reader, payload_len)?;
+                let pat: [u8; 4] = buf[pos..pos + 4].try_into().unwrap();
+                pos += payload_len;
+                for i in 0..need_out {
+                    out.push(pat[i & 3]);
+                }
+            }
+            CHUNK_TYPE_DONT_CARE => {
+                out.resize(out.len() + need_out, 0);
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
 thread_local! {
     static SPARSE_IN_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static SPARSE_OUT_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };

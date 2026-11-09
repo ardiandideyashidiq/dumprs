@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
@@ -20,7 +20,8 @@ use crate::formats::payload::ZIP_SLICE_MAGIC;
 use crate::formats::sevenzip::unpack_sevenzip;
 use crate::formats::sparse::{
     extract_stream_or_sparse, extract_stream_or_sparse_pipelined, extract_stream_to_anon,
-    extract_stream_to_anon_pipelined, peek_sparse_virtual_size, SharedAnonSlice,
+    extract_stream_to_anon_pipelined, peek_sparse_first_offset, peek_sparse_prefix,
+    peek_sparse_virtual_size, SharedAnonSlice,
 };
 use crate::utils::files::{
     can_use_anon_mmap, flatten_dir, get_recursive_files_list, is_early_extract_allowed,
@@ -57,21 +58,33 @@ fn unpack_tar_stream<R: Read>(reader: R, dest_dir: &Path, label: &'static str, t
     Ok(())
 }
 
-fn parse_sparsechunk_target(name: &Path, known_parts: &HashSet<String>) -> Option<String> {
+fn parse_sparsechunk_target(name: &Path, known_parts: &HashSet<String>) -> Option<(String, u64)> {
     let file_name = name.file_name()?.to_str()?;
     let (part, rest) = file_name.split_once(".img_sparsechunk.")?;
-    let _ = rest.parse::<u64>().ok()?;
+    let num = rest.parse::<u64>().ok()?;
     if known_parts.contains(part) {
-        Some(part.to_string())
+        Some((part.to_string(), num))
     } else {
         None
     }
 }
+
+struct TrackedLpPart {
+    name: String,
+    start: usize,
+    end: usize,
+    out_dir: PathBuf,
+    remaining_chunks: AtomicUsize,
+}
+
 enum SparseChunkTarget {
     Anon {
         mmap: MmapMut,
         slice: SharedAnonSlice,
         max_len: AtomicU64,
+        lp_parts: Vec<TrackedLpPart>,
+        chunk_to_parts: HashMap<usize, Vec<usize>>,
+        skip_entries: HashSet<usize>,
     },
     Disk {
         file: Arc<File>,
@@ -120,7 +133,9 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         let mut dirs = HashSet::new();
         let mut file_indices = Vec::with_capacity(total_entries);
         let mut sparsechunk_targets: HashMap<PathBuf, SparseChunkTarget> = HashMap::new();
-        let mut sparsechunk_totals: HashMap<PathBuf, (usize, u64)> = HashMap::new();
+        let mut sparsechunk_groups: HashMap<PathBuf, (u64, Vec<(u64, usize, u64)>)> =
+            HashMap::new();
+        let mut entry_priority: HashMap<usize, usize> = HashMap::new();
 
         for i in 0..total_entries {
             let entry = zip.by_index_raw(i)?;
@@ -144,43 +159,81 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         for &(i, sz) in &file_indices {
             let entry = zip.by_index_raw(i)?;
             let mangled = entry.mangled_name();
-            if let Some(part) = parse_sparsechunk_target(&mangled, &known_parts) {
+            if let Some((part, chunk_num)) = parse_sparsechunk_target(&mangled, &known_parts) {
                 let parent = dest_dir
                     .join(&mangled)
                     .parent()
                     .unwrap_or(dest_dir)
                     .to_path_buf();
                 let target_img = parent.join(format!("{}.img", part));
-                let stat = sparsechunk_totals.entry(target_img).or_insert((i, 0));
-                stat.1 += sz;
+                let grp = sparsechunk_groups
+                    .entry(target_img)
+                    .or_insert_with(|| (0, Vec::new()));
+                grp.0 += sz;
+                grp.1.push((chunk_num, i, sz));
             }
         }
 
-        for (target_img, (sample_idx, group_bytes)) in sparsechunk_totals {
+        let out_root = dest_dir.parent().map(|p| p.to_path_buf());
+        let early_ok = is_early_extract_allowed() && out_root.is_some();
+
+        for (target_img, (group_bytes, mut chunks)) in sparsechunk_groups {
+            chunks.sort_unstable_by_key(|&(num, _, _)| num);
             let mut virtual_size = None;
+            let mut chunk_offsets = Vec::with_capacity(chunks.len());
+            let mut lp_extents = Vec::new();
+
             if can_use_anon_mmap(group_bytes) {
-                let entry = zip.by_index_raw(sample_idx)?;
-                let start = entry.data_start() as usize;
-                let comp_end = start.saturating_add(entry.compressed_size() as usize);
-                let compression = entry.compression();
-                drop(entry);
-                let mut hdr_buf = [0u8; 64];
-                let mut got = 0usize;
-                if compression == zip::CompressionMethod::Deflated && comp_end <= mmap.len() {
-                    let mut dec = DeflateDecoder::new(&mmap[start..comp_end]);
-                    while got < 28 {
-                        let n = dec.read(&mut hdr_buf[got..])?;
-                        if n == 0 {
-                            break;
+                for &(num, entry_idx, _) in &chunks {
+                    let entry = zip.by_index_raw(entry_idx)?;
+                    let start = entry.data_start() as usize;
+                    let comp_end = start.saturating_add(entry.compressed_size() as usize);
+                    let compression = entry.compression();
+                    drop(entry);
+                    let mut hdr_buf = [0u8; 64];
+                    let mut got = 0usize;
+                    if compression == zip::CompressionMethod::Deflated && comp_end <= mmap.len() {
+                        let mut dec = DeflateDecoder::new(&mmap[start..comp_end]);
+                        while got < 48 {
+                            let n = dec.read(&mut hdr_buf[got..])?;
+                            if n == 0 {
+                                break;
+                            }
+                            got += n;
                         }
-                        got += n;
+                    } else if compression == zip::CompressionMethod::Stored
+                        && comp_end <= mmap.len()
+                    {
+                        got = 48.min(comp_end - start);
+                        hdr_buf[..got].copy_from_slice(&mmap[start..start + got]);
                     }
-                } else if compression == zip::CompressionMethod::Stored && comp_end <= mmap.len() {
-                    got = 28.min(comp_end - start);
-                    hdr_buf[..got].copy_from_slice(&mmap[start..start + got]);
-                }
-                if got >= 28 {
-                    virtual_size = peek_sparse_virtual_size(&hdr_buf[..got])?;
+                    if got >= 28
+                        && let Some((vsize, first_off)) = peek_sparse_first_offset(&hdr_buf[..got])?
+                    {
+                        virtual_size = Some(vsize);
+                        chunk_offsets.push((entry_idx, first_off));
+                    }
+                    if num == 0 && early_ok {
+                        let prefix = if compression == zip::CompressionMethod::Deflated
+                            && comp_end <= mmap.len()
+                        {
+                            peek_sparse_prefix(
+                                DeflateDecoder::new(&mmap[start..comp_end]),
+                                64 * 1024,
+                            )
+                            .unwrap_or_default()
+                        } else if compression == zip::CompressionMethod::Stored
+                            && comp_end <= mmap.len()
+                        {
+                            peek_sparse_prefix(&mmap[start..comp_end], 64 * 1024)
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        if let Ok(parts) = parse_lp_single_extents(&prefix) {
+                            lp_extents = parts;
+                        }
+                    }
                 }
             }
 
@@ -188,12 +241,66 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                 && let Ok(mut anon) = MmapOptions::new().len(vsize as usize).map_anon()
             {
                 let slice = SharedAnonSlice::from_mmap_mut(&mut anon);
+                let mut tracked_parts = Vec::new();
+                let mut chunk_to_parts: HashMap<usize, Vec<usize>> = HashMap::new();
+                let mut skip_entries: HashSet<usize> = HashSet::new();
+
+                if !lp_extents.is_empty()
+                    && chunk_offsets.len() == chunks.len()
+                    && let Some(ref root) = out_root
+                {
+                    for (pname, pstart, pend) in lp_extents {
+                        if get_partition_type(&pname) == Some(PartitionType::Filesystem)
+                            && pend <= vsize as usize
+                        {
+                            tracked_parts.push(TrackedLpPart {
+                                out_dir: root.join(&pname),
+                                name: pname,
+                                start: pstart,
+                                end: pend,
+                                remaining_chunks: AtomicUsize::new(0),
+                            });
+                        }
+                    }
+                    for k in 0..chunk_offsets.len() {
+                        let (entry_idx, cstart) = chunk_offsets[k];
+                        let cend = if k + 1 < chunk_offsets.len() {
+                            chunk_offsets[k + 1].1.max(cstart + 4096)
+                        } else {
+                            vsize
+                        };
+                        let mut overlaps = Vec::new();
+                        for (p_idx, tp) in tracked_parts.iter().enumerate() {
+                            if (cstart as usize) < tp.end && (cend as usize) > tp.start {
+                                overlaps.push(p_idx);
+                                tp.remaining_chunks.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        if overlaps.is_empty() && cstart >= 2 * 1024 * 1024 {
+                            skip_entries.insert(entry_idx);
+                        } else {
+                            chunk_to_parts.insert(entry_idx, overlaps);
+                        }
+                    }
+                    for (&entry_idx, p_indices) in &chunk_to_parts {
+                        let min_chunks = p_indices
+                            .iter()
+                            .map(|&pi| tracked_parts[pi].remaining_chunks.load(Ordering::Relaxed))
+                            .min()
+                            .unwrap_or(999);
+                        entry_priority.insert(entry_idx, min_chunks);
+                    }
+                }
+
                 sparsechunk_targets.insert(
                     target_img,
                     SparseChunkTarget::Anon {
                         mmap: anon,
                         slice,
                         max_len: AtomicU64::new(vsize),
+                        lp_parts: tracked_parts,
+                        chunk_to_parts,
+                        skip_entries,
                     },
                 );
             } else {
@@ -214,7 +321,11 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
             }
         }
 
-        file_indices.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        file_indices.sort_unstable_by(|a, b| {
+            let pa = entry_priority.get(&a.0).copied().unwrap_or(500);
+            let pb_prio = entry_priority.get(&b.0).copied().unwrap_or(500);
+            pa.cmp(&pb_prio).then_with(|| b.1.cmp(&a.1))
+        });
 
         info!(
             archive = %archive_path.display(),
@@ -223,7 +334,6 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
             "zip.extract.start"
         );
         let pb = ByteProgress::new("zip", total_bytes);
-
         file_indices
             .into_par_iter()
             .with_max_len(1)
@@ -258,12 +368,23 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                         fs::create_dir_all(parent)?;
                     }
 
-                    if let Some(part) = parse_sparsechunk_target(&name, &known_parts) {
+                    if let Some((part, _)) = parse_sparsechunk_target(&name, &known_parts) {
                         let parent = out_path.parent().unwrap_or(dest_dir);
                         let target_img = parent.join(format!("{}.img", part));
                         if let Some(target) = sparsechunk_targets.get(&target_img) {
                             match target {
-                                SparseChunkTarget::Anon { slice, max_len, .. } => {
+                                SparseChunkTarget::Anon {
+                                    slice,
+                                    max_len,
+                                    lp_parts,
+                                    chunk_to_parts,
+                                    skip_entries,
+                                    ..
+                                } => {
+                                    if skip_entries.contains(&i) {
+                                        pb.inc(size);
+                                        return Ok(());
+                                    }
                                     let end_off =
                                         if compression == zip::CompressionMethod::Deflated
                                             && comp_end <= mmap.len()
@@ -286,6 +407,32 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                                             )?
                                         };
                                     max_len.fetch_max(end_off, Ordering::Relaxed);
+                                    if let Some(p_indices) = chunk_to_parts.get(&i) {
+                                        for &p_idx in p_indices {
+                                            let tp = &lp_parts[p_idx];
+                                            if tp.remaining_chunks.fetch_sub(1, Ordering::AcqRel)
+                                                == 1
+                                            {
+                                                info!(
+                                                    partition = %tp.name,
+                                                    size = %HumanBytes((tp.end - tp.start) as u64),
+                                                    mode = "streaming",
+                                                    "partition.extract.begin"
+                                                );
+                                                let pslice =
+                                                    unsafe { slice.subslice(tp.start, tp.end) };
+                                                if extract_filesystem_slice(
+                                                    pslice,
+                                                    &tp.out_dir,
+                                                    &tp.name,
+                                                )
+                                                .is_ok()
+                                                {
+                                                    mark_early_extracted(tp.out_dir.clone());
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 SparseChunkTarget::Disk { file, max_len } => {
                                     let (_, end_off) =

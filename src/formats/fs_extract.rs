@@ -7,7 +7,7 @@ use memmap2::Mmap;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -203,24 +203,50 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
     let bytes_extracted = AtomicU64::new(0);
 
     files_to_extract.into_par_iter().try_for_each_init(
-        || vec![0u8; 256 * 1024],
+        || vec![0u8; 4 * 1024 * 1024],
         |copy_buf, (inode, target)| -> Result<()> {
+            let expected_size = inode.data_size() as usize;
+            if expected_size == 0 {
+                File::create(&target)
+                    .with_context(|| format!("Failed to create {}", target.display()))?;
+                return Ok(());
+            }
+
             let mut file = fs.open_inode_file(inode).map_err(|e| {
                 anyhow::anyhow!("Failed to open erofs file {}: {:?}", target.display(), e)
             })?;
-            let mut out_file = File::create(&target)
-                .with_context(|| format!("Failed to create {}", target.display()))?;
-            let mut file_bytes = 0u64;
-            loop {
-                let n = file.read(copy_buf)?;
-                if n == 0 {
-                    break;
+
+            if expected_size <= copy_buf.len() {
+                let mut filled = 0usize;
+                while filled < expected_size {
+                    let n = file.read(&mut copy_buf[filled..expected_size])?;
+                    if n == 0 {
+                        break;
+                    }
+                    filled += n;
                 }
-                out_file.write_all(&copy_buf[..n])?;
-                file_bytes += n as u64;
+                fs::write(&target, &copy_buf[..filled])
+                    .with_context(|| format!("Failed to write {}", target.display()))?;
+                let file_bytes = filled as u64;
+                bytes_extracted.fetch_add(file_bytes, Ordering::Relaxed);
+                pb.inc(file_bytes);
+            } else {
+                let out_file = File::create(&target)
+                    .with_context(|| format!("Failed to create {}", target.display()))?;
+                let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, out_file);
+                let mut file_bytes = 0u64;
+                loop {
+                    let n = file.read(copy_buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    writer.write_all(&copy_buf[..n])?;
+                    file_bytes += n as u64;
+                }
+                writer.flush()?;
+                bytes_extracted.fetch_add(file_bytes, Ordering::Relaxed);
+                pb.inc(file_bytes);
             }
-            bytes_extracted.fetch_add(file_bytes, Ordering::Relaxed);
-            pb.inc(file_bytes);
             debug!(partition = part_name, file = %target.display(), "erofs.extract_file");
             Ok(())
         },
