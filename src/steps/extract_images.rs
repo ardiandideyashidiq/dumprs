@@ -2,14 +2,17 @@ use anyhow::Result;
 use indicatif::HumanBytes;
 use rayon::prelude::*;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{error, info};
 
 use crate::formats::bootimg::extract_bootimg;
 use crate::formats::fs_extract::extract_filesystem;
 use crate::utils::files::{hardlink_or_copy, logical_image_size, was_early_extracted};
+use crate::utils::firmware::{
+    is_excluded_partition_name, is_scatter_filename, matches_partition_filter,
+    sniff_file_header_kind, HeaderKind, ScatterInfo,
+};
 use crate::utils::partitions::{get_partition_names, get_partition_type, PartitionType};
-
 pub fn extract_images(
     raw_images_path: &Path,
     output_path: &Path,
@@ -126,6 +129,178 @@ pub fn extract_images_with_cleanup(
             }
         });
 
+
+    extract_extra_firmware_and_scatter(
+        raw_images_path,
+        output_path,
+        filter_partitions,
+        resume,
+        cleanup_raw,
+    )?;
     info!(count = partitions.len(), "partitions.extract.done");
+    Ok(())
+}
+
+enum ExtraItemKind {
+    Scatter,
+    Image(HeaderKind),
+}
+
+fn extract_extra_firmware_and_scatter(
+    raw_images_path: &Path,
+    output_path: &Path,
+    filter_partitions: &[String],
+    resume: bool,
+    cleanup_raw: bool,
+) -> Result<()> {
+    let scatter = ScatterInfo::from_dir(raw_images_path);
+    let entries = match fs::read_dir(raw_images_path) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+
+    let mut items: Vec<(String, PathBuf, u64, ExtraItemKind)> = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if fname.starts_with('.') || fname.starts_with("super") {
+            continue;
+        }
+        if is_scatter_filename(fname) {
+            if filter_partitions.is_empty()
+                || filter_partitions
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case("scatter") || f.eq_ignore_ascii_case(fname))
+            {
+                let sz = logical_image_size(&path).unwrap_or(0);
+                items.push((fname.to_string(), path, sz, ExtraItemKind::Scatter));
+            }
+            continue;
+        }
+
+        let stem = fname.split('.').next().unwrap_or(fname);
+        if fname.ends_with(".img") && get_partition_type(stem).is_some() {
+            continue;
+        }
+        if is_excluded_partition_name(stem) {
+            continue;
+        }
+        if scatter.is_superseded_variant(fname) {
+            continue;
+        }
+        if !matches_partition_filter(filter_partitions, fname, &scatter) {
+            continue;
+        }
+
+        let Some(file_size) = logical_image_size(&path) else {
+            continue;
+        };
+        if file_size == 0 {
+            continue;
+        }
+        let kind = sniff_file_header_kind(&path).unwrap_or(HeaderKind::Unknown);
+        if kind == HeaderKind::NonPartition {
+            continue;
+        }
+        let lower = fname.to_ascii_lowercase();
+        if kind == HeaderKind::Unknown
+            && !scatter.references_file(fname)
+            && !lower.ends_with(".img")
+            && !lower.ends_with(".bin")
+            && !lower.ends_with(".mbn")
+            && !lower.ends_with(".elf")
+        {
+            continue;
+        }
+        items.push((fname.to_string(), path, file_size, ExtraItemKind::Image(kind)));
+    }
+
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    items.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+    info!(count = items.len(), "firmware.extract.start");
+
+    items
+        .into_par_iter()
+        .with_max_len(1)
+        .for_each(|(fname, image_path, file_size, item_kind)| {
+            let copy_dest = output_path.join(&fname);
+            match item_kind {
+                ExtraItemKind::Scatter => {
+                    if !(resume && copy_dest.is_file()) {
+                        if let Err(e) = hardlink_or_copy(&image_path, &copy_dest) {
+                            error!(file = %fname, error = ?e, "scatter.copy.failed");
+                        } else {
+                            info!(file = %fname, size = %HumanBytes(file_size), "scatter.extract.done");
+                        }
+                    }
+                    if cleanup_raw {
+                        let _ = fs::remove_file(&image_path);
+                    }
+                }
+                ExtraItemKind::Image(kind) => {
+                    let stem = fname.split('.').next().unwrap_or(&fname);
+                    match kind {
+                        HeaderKind::BootImage => {
+                            let part_out = output_path.join(stem);
+                            if !(resume && part_out.is_dir())
+                                && let Err(e) = extract_bootimg(&image_path, &part_out)
+                            {
+                                error!(partition = stem, image = %image_path.display(), error = ?e, "firmware.bootimg.failed");
+                            }
+                            if !(resume && copy_dest.is_file())
+                                && let Err(e) = hardlink_or_copy(&image_path, &copy_dest)
+                            {
+                                error!(file = %fname, error = ?e, "firmware.copy.failed");
+                            }
+                        }
+                        HeaderKind::Filesystem => {
+                            let part_out = output_path.join(stem);
+                            if !(resume && part_out.is_dir()) {
+                                if let Err(e) = extract_filesystem(&image_path, &part_out) {
+                                    let is_empty = fs::read_dir(&part_out)
+                                        .map(|mut d| d.next().is_none())
+                                        .unwrap_or(true);
+                                    if is_empty {
+                                        let _ = fs::remove_dir(&part_out);
+                                        if let Err(copy_err) = hardlink_or_copy(&image_path, &copy_dest) {
+                                            error!(file = %fname, error = ?copy_err, "firmware.filesystem_fallback.failed");
+                                        } else {
+                                            info!(file = %fname, "firmware.filesystem.fallback_raw");
+                                        }
+                                    } else {
+                                        error!(partition = stem, error = ?e, "firmware.filesystem.failed");
+                                    }
+                                }
+                            }
+                        }
+                        HeaderKind::FirmwareRaw
+                        | HeaderKind::Sparse
+                        | HeaderKind::Unknown
+                        | HeaderKind::NonPartition => {
+                            if !(resume && copy_dest.is_file()) {
+                                if let Err(e) = hardlink_or_copy(&image_path, &copy_dest) {
+                                    error!(file = %fname, error = ?e, "firmware.copy.failed");
+                                } else {
+                                    info!(file = %fname, size = %HumanBytes(file_size), "firmware.extract.done");
+                                }
+                            }
+                        }
+                    }
+                    if cleanup_raw {
+                        let _ = fs::remove_file(&image_path);
+                    }
+                }
+            }
+        });
+
+    info!("firmware.extract.done");
     Ok(())
 }

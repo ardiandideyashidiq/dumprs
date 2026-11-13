@@ -27,6 +27,9 @@ use crate::utils::files::{
     can_use_anon_mmap, flatten_dir, get_recursive_files_list, is_early_extract_allowed,
     mark_early_extracted, register_in_memory_image,
 };
+use crate::utils::firmware::{
+    is_candidate_firmware_path, is_scatter_filename, ScatterInfo,
+};
 use crate::utils::partitions::{
     get_partition_name, get_partition_names_with_ab, get_partition_names_with_alias,
     get_partition_type, PartitionType,
@@ -69,7 +72,11 @@ fn parse_sparsechunk_target(name: &Path, known_parts: &HashSet<String>) -> Optio
         None
     }
 }
-fn is_relevant_zip_entry(name: &Path, known_parts_ab: &HashSet<String>) -> bool {
+fn is_relevant_zip_entry(
+    name: &Path,
+    known_parts_ab: &HashSet<String>,
+    scatter: &ScatterInfo,
+) -> bool {
     let Some(fname) = name.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
@@ -79,11 +86,20 @@ fn is_relevant_zip_entry(name: &Path, known_parts_ab: &HashSet<String>) -> bool 
     if fname.starts_with("super") && !fname.contains("_empty") {
         return true;
     }
+    if is_scatter_filename(fname) {
+        return true;
+    }
     if let Some((part, _)) = fname.split_once(".img_sparsechunk.") {
         return known_parts_ab.contains(part);
     }
     let stem = fname.split('.').next().unwrap_or(fname);
-    known_parts_ab.contains(stem)
+    if known_parts_ab.contains(stem) {
+        return true;
+    }
+    if scatter.references_file(fname) {
+        return true;
+    }
+    !scatter.is_superseded_variant(fname) && is_candidate_firmware_path(name)
 }
 
 
@@ -157,11 +173,36 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
             HashMap::new();
         let mut entry_priority: HashMap<usize, usize> = HashMap::new();
 
+        let mut scatter_info = ScatterInfo::default();
+        let mut scatter_buf = Vec::new();
+        for i in 0..total_entries {
+            let entry = zip.by_index_raw(i)?;
+            if entry.is_dir() {
+                continue;
+            }
+            let mangled = entry.mangled_name();
+            let size = entry.size();
+            drop(entry);
+            if size <= 4 * 1024 * 1024
+                && mangled
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(is_scatter_filename)
+            {
+                scatter_buf.clear();
+                let mut zf = zip.by_index(i)?;
+                zf.read_to_end(&mut scatter_buf)?;
+                scatter_info.parse_bytes(&scatter_buf);
+            }
+        }
+
         for i in 0..total_entries {
             let entry = zip.by_index_raw(i)?;
             let size = entry.size();
             let mangled = entry.mangled_name();
-            if !entry.is_dir() && filter_unused && !is_relevant_zip_entry(&mangled, &known_parts_ab)
+            if !entry.is_dir()
+                && filter_unused
+                && !is_relevant_zip_entry(&mangled, &known_parts_ab, &scatter_info)
             {
                 continue;
             }
@@ -489,12 +530,18 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                         .and_then(|e| e.to_str())
                         .is_some_and(|e| e.eq_ignore_ascii_case("img"));
 
-                    if is_img
+                    let fname_str = name
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    let stem = fname_str.split('.').next().unwrap_or(fname_str);
+                    let use_anon = is_img
+                        && (fname_str.starts_with("super") || known_parts_ab.contains(stem));
+                    if use_anon
                         && size >= 4096
                         && compression == zip::CompressionMethod::Deflated
                         && comp_end <= mmap.len()
-                        && can_use_anon_mmap(size)
-                    {
+                        && can_use_anon_mmap(size) {
                         let comp_slice = &mmap[start..comp_end];
                         let mut dec = DeflateDecoder::new(comp_slice);
                         let mut head = [0u8; 64];

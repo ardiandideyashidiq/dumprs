@@ -1,9 +1,17 @@
 use anyhow::Result;
+use indicatif::HumanBytes;
 use rayon::prelude::*;
+use std::fs::{self, File};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use tracing::{debug, info};
 
-use crate::utils::files::get_recursive_files_list;
+use crate::formats::sparse::unsparse_file;
+use crate::utils::files::{get_recursive_files_list, move_or_copy};
+use crate::utils::firmware::{
+    is_candidate_firmware_path, is_excluded_partition_name, is_scatter_filename,
+    sniff_file_header_kind, strip_slot_suffix, HeaderKind, ScatterInfo,
+};
 use crate::utils::multipartitions::get_multipartition_rules;
 use crate::utils::partitions::{
     correct_ab_filenames, fix_aliases, get_partition_names_with_ab,
@@ -74,6 +82,121 @@ pub fn prepare_images(extracted_archive_path: &Path, raw_images_path: &Path) -> 
 
     // Fix aliases
     fix_aliases(raw_images_path)?;
+
+    prepare_firmware_and_scatter(extracted_archive_path, raw_images_path)?;
+
+    Ok(())
+}
+
+fn prepare_firmware_and_scatter(
+    extracted_archive_path: &Path,
+    raw_images_path: &Path,
+) -> Result<()> {
+    let scatter = ScatterInfo::from_dir(extracted_archive_path);
+    let entries = match fs::read_dir(extracted_archive_path) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+
+    let mut candidates = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if is_scatter_filename(fname) {
+            let dst = raw_images_path.join(fname);
+            if !dst.exists() {
+                move_or_copy(&path, &dst)?;
+                info!(file = fname, "scatter.prepared");
+            }
+            continue;
+        }
+        if fname.starts_with('.') || fname.starts_with("super") {
+            continue;
+        }
+        let stem = fname.split('.').next().unwrap_or(fname);
+        if is_excluded_partition_name(stem) {
+            continue;
+        }
+        if scatter.is_superseded_variant(fname) {
+            debug!(file = fname, "firmware.superseded_by_scatter");
+            continue;
+        }
+        if scatter.references_file(fname) || is_candidate_firmware_path(Path::new(fname)) {
+            let fname_owned = fname.to_string();
+            candidates.push((path, fname_owned));
+        }
+    }
+
+    candidates
+        .into_par_iter()
+        .try_for_each(|(path, fname)| -> Result<()> {
+            let (src_path, target_name) = if let Some(stripped) = fname.strip_suffix(".lz4") {
+                let decomp_path = extracted_archive_path.join(stripped);
+                if !decomp_path.exists() {
+                    let lz4_size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    info!(file = %fname, size = %HumanBytes(lz4_size), "firmware.lz4.decompress");
+                    let input = File::open(&path)?;
+                    let mut decoder = lz4_flex::frame::FrameDecoder::new(BufReader::with_capacity(
+                        256 * 1024,
+                        input,
+                    ));
+                    let out_file = File::create(&decomp_path)?;
+                    let mut writer = BufWriter::with_capacity(1024 * 1024, out_file);
+                    let mut buf = vec![0u8; 256 * 1024];
+                    loop {
+                        let n = decoder.read(&mut buf)?;
+                        if n == 0 {
+                            break;
+                        }
+                        writer.write_all(&buf[..n])?;
+                    }
+                    writer.flush()?;
+                    let _ = fs::remove_file(&path);
+                }
+                (decomp_path, stripped.to_string())
+            } else {
+                (path, fname.clone())
+            };
+
+            let stem = target_name.split('.').next().unwrap_or(&target_name);
+            let unslotted_stem = strip_slot_suffix(stem);
+            let dst = raw_images_path.join(&target_name);
+            let dst_img = raw_images_path.join(format!("{}.img", unslotted_stem));
+            if dst.exists() || dst_img.exists() {
+                return Ok(());
+            }
+
+            let kind = sniff_file_header_kind(&src_path)?;
+            match kind {
+                HeaderKind::NonPartition => {
+                    debug!(file = %target_name, "firmware.ignored_non_partition");
+                }
+                HeaderKind::Sparse => {
+                    if let Ok(true) = unsparse_file(&src_path, &dst) {
+                        let _ = fs::remove_file(&src_path);
+                        info!(file = %target_name, kind = "sparse", "firmware.prepared");
+                    }
+                }
+                HeaderKind::BootImage | HeaderKind::Filesystem | HeaderKind::FirmwareRaw => {
+                    move_or_copy(&src_path, &dst)?;
+                    info!(file = %target_name, ?kind, "firmware.prepared");
+                }
+                HeaderKind::Unknown => {
+                    if scatter.references_file(&target_name) {
+                        move_or_copy(&src_path, &dst)?;
+                        info!(file = %target_name, kind = "scatter_ref", "firmware.prepared");
+                    } else {
+                        debug!(file = %target_name, "firmware.ignored_unknown");
+                    }
+                }
+            }
+            Ok(())
+        })?;
 
     Ok(())
 }

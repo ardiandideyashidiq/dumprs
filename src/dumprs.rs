@@ -140,6 +140,8 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
     let cleanup_temp = !options.debug && !options.resume;
     let mut files_list = Vec::new();
     let mut total_bytes = 0u64;
+    let mut root_files = 0usize;
+    let mut root_bytes = 0u64;
     let mut part_stats: HashMap<String, (usize, u64)> = HashMap::new();
     rayon::join(
         || {
@@ -178,16 +180,22 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
                         let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
                         total_bytes += len;
                         let mut comps = rel.components();
-                        if let (Some(std::path::Component::Normal(top)), Some(_)) =
-                            (comps.next(), comps.next())
-                            && let Some(top_str) = top.to_str()
-                        {
-                            if let Some(stat) = part_stats.get_mut(top_str) {
-                                stat.0 += 1;
-                                stat.1 += len;
-                            } else {
-                                part_stats.insert(top_str.to_string(), (1, len));
+                        match (comps.next(), comps.next()) {
+                            (Some(std::path::Component::Normal(top)), Some(_)) => {
+                                if let Some(top_str) = top.to_str() {
+                                    if let Some(stat) = part_stats.get_mut(top_str) {
+                                        stat.0 += 1;
+                                        stat.1 += len;
+                                    } else {
+                                        part_stats.insert(top_str.to_string(), (1, len));
+                                    }
+                                }
                             }
+                            (Some(std::path::Component::Normal(_)), None) => {
+                                root_files += 1;
+                                root_bytes += len;
+                            }
+                            _ => {}
                         }
                         files_list.push(rel.to_path_buf());
                     }
@@ -214,9 +222,10 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
         start_time.elapsed(),
         files_list.len(),
         total_bytes,
+        root_files,
+        root_bytes,
         &part_stats,
     );
-
     Ok(output_path.to_path_buf())
 }
 
@@ -225,6 +234,8 @@ fn log_summary(
     duration: std::time::Duration,
     total_files: usize,
     total_bytes: u64,
+    root_files: usize,
+    root_bytes: u64,
     part_stats: &HashMap<String, (usize, u64)>,
 ) {
     for partition in get_partition_names() {
@@ -248,6 +259,13 @@ fn log_summary(
                 );
             }
         }
+    }
+    if root_files > 0 {
+        info!(
+            files = root_files,
+            size = %HumanBytes(root_bytes),
+            "firmware.summary"
+        );
     }
 
     info!(
