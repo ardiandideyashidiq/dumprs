@@ -178,7 +178,9 @@ pub fn parse_gpt_entries(data: &[u8]) -> Vec<GptPartition> {
 
         let name_bytes = &entry_buf[56..128];
         let name_u16: Vec<u16> = name_bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .take_while(|&c| c != 0)
             .collect();
@@ -289,7 +291,7 @@ pub fn unpack_dz(filename: &Path, work_dir: &Path) -> Result<()> {
         }
 
         let chunk_start_lba = chunk.target_addr as u64;
-        let chunk_blocks = (payload.len() as u64 + 511) / 512;
+        let chunk_blocks = (payload.len() as u64).div_ceil(512);
         let chunk_end_lba = chunk_start_lba.saturating_add(chunk_blocks);
         slice_extents
             .entry(chunk.slice_name.clone())

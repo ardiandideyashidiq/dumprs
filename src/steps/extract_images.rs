@@ -51,7 +51,7 @@ pub fn extract_images_with_cleanup(
         })
         .collect();
 
-    partitions.sort_unstable_by(|a, b| b.3.cmp(&a.3));
+    partitions.sort_unstable_by_key(|a| std::cmp::Reverse(a.3));
 
     info!(count = partitions.len(), "partitions.extract.start");
     partitions
@@ -234,7 +234,7 @@ fn extract_extra_firmware_and_scatter(
         return Ok(());
     }
 
-    items.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+    items.sort_unstable_by_key(|a| std::cmp::Reverse(a.2));
     info!(count = items.len(), "firmware.extract.start");
 
     items
@@ -273,8 +273,8 @@ fn extract_extra_firmware_and_scatter(
                         }
                         HeaderKind::Filesystem => {
                             let part_out = output_path.join(stem);
-                            if !(resume && part_out.is_dir()) {
-                                if let Err(e) = extract_filesystem(&image_path, &part_out) {
+                            if !(resume && part_out.is_dir())
+                                && let Err(e) = extract_filesystem(&image_path, &part_out) {
                                     let is_empty = fs::read_dir(&part_out)
                                         .map(|mut d| d.next().is_none())
                                         .unwrap_or(true);
@@ -289,7 +289,6 @@ fn extract_extra_firmware_and_scatter(
                                         error!(partition = stem, error = ?e, "firmware.filesystem.failed");
                                     }
                                 }
-                            }
                         }
                         HeaderKind::FirmwareRaw
                         | HeaderKind::Sparse

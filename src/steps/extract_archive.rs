@@ -34,6 +34,8 @@ use crate::utils::partitions::{
 };
 use crate::utils::progress::ByteProgress;
 
+type SparseChunkGroup = (u64, Vec<(u64, usize, u64)>);
+
 fn unpack_tar_stream<R: Read>(
     reader: R,
     dest_dir: &Path,
@@ -171,8 +173,7 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         let mut dirs = HashSet::new();
         let mut file_indices = Vec::with_capacity(total_entries);
         let mut sparsechunk_targets: HashMap<PathBuf, SparseChunkTarget> = HashMap::new();
-        let mut sparsechunk_groups: HashMap<PathBuf, (u64, Vec<(u64, usize, u64)>)> =
-            HashMap::new();
+        let mut sparsechunk_groups: HashMap<PathBuf, SparseChunkGroup> = HashMap::new();
         let mut entry_priority: HashMap<usize, usize> = HashMap::new();
 
         let mut scatter_info = ScatterInfo::default();

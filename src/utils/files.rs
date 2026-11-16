@@ -39,7 +39,7 @@ pub fn available_ram_bytes() -> u64 {
     if let Ok(meminfo) = fs::read_to_string("/proc/meminfo") {
         for line in meminfo.lines() {
             if let Some(rest) = line.strip_prefix("MemAvailable:") {
-                let kb_str = rest.trim().split_whitespace().next().unwrap_or("0");
+                let kb_str = rest.split_whitespace().next().unwrap_or("0");
                 if let Ok(kb) = kb_str.parse::<u64>() {
                     return kb * 1024;
                 }

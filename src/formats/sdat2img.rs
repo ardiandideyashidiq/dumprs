@@ -12,7 +12,7 @@ use crate::utils::progress::ByteProgress;
 const BLOCK_SIZE: u64 = 4096;
 const SMALL_GAP_THRESHOLD: u64 = 64 * 1024;
 const FAST_MEM_LIMIT: u64 = 8 * 1024 * 1024;
-const ZERO_BUF: [u8; 64 * 1024] = [0u8; 64 * 1024];
+static ZERO_BUF: [u8; 64 * 1024] = [0u8; 64 * 1024];
 
 thread_local! {
     static SDAT_IN_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -54,7 +54,9 @@ fn parse_rangeset_into(
     Ok(())
 }
 
-fn parse_transfer_list(path: &Path) -> Result<(u32, u64, u64, Vec<(u64, u64)>)> {
+type TransferListInfo = (u32, u64, u64, Vec<(u64, u64)>);
+
+fn parse_transfer_list(path: &Path) -> Result<TransferListInfo> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
     let mut lines = content.lines();

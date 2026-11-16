@@ -21,7 +21,7 @@ const CHUNK_TYPE_CRC32: u16 = 0xcac4;
 
 const HOLE_SEEK_THRESHOLD: u64 = 64 * 1024;
 const FAST_MEM_LIMIT: u64 = 8 * 1024 * 1024;
-const ZERO_BUF: [u8; 64 * 1024] = [0u8; 64 * 1024];
+static ZERO_BUF: [u8; 64 * 1024] = [0u8; 64 * 1024];
 
 #[cfg(unix)]
 fn write_at(file: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
@@ -602,7 +602,7 @@ fn decode_sparse_mmap(
                     if fill_buf.is_empty() {
                         fill_buf.resize(256 * 1024, 0);
                     }
-                    for chunk in fill_buf.chunks_exact_mut(4) {
+                    for chunk in fill_buf.as_chunks_mut::<4>().0 {
                         chunk.copy_from_slice(&fill_bytes);
                     }
                     let mut rem = out_bytes as usize;
@@ -697,7 +697,7 @@ fn decode_sparse_mmap_at(
                     if fill_buf.is_empty() {
                         fill_buf.resize(256 * 1024, 0);
                     }
-                    for chunk in fill_buf.chunks_exact_mut(4) {
+                    for chunk in fill_buf.as_chunks_mut::<4>().0 {
                         chunk.copy_from_slice(&fill_bytes);
                     }
                     let mut rem = out_bytes as usize;
@@ -940,7 +940,7 @@ pub fn extract_stream_or_sparse<R: Read>(
                     if fill_buf.is_empty() {
                         fill_buf.resize(256 * 1024, 0);
                     }
-                    for chunk in fill_buf.chunks_exact_mut(4) {
+                    for chunk in fill_buf.as_chunks_mut::<4>().0 {
                         chunk.copy_from_slice(&fill_bytes);
                     }
                     let mut rem = out_bytes as usize;
@@ -1185,7 +1185,7 @@ pub fn extract_stream_to_anon_with_cb<R: Read, F: FnMut(u64) -> bool>(
                     if fill_buf.is_empty() {
                         fill_buf.resize(256 * 1024, 0);
                     }
-                    for chunk in fill_buf.chunks_exact_mut(4) {
+                    for chunk in fill_buf.as_chunks_mut::<4>().0 {
                         chunk.copy_from_slice(&fill_bytes);
                     }
                     let mut rem = out_bytes as usize;
@@ -1284,7 +1284,7 @@ pub fn unsparse_file(src_path: &Path, dst_path: &Path) -> Result<bool> {
                                     out_buf[out_offset..out_offset + out_bytes].fill(0);
                                 } else {
                                     for chunk in out_buf[out_offset..out_offset + out_bytes]
-                                        .chunks_exact_mut(4)
+                                        .as_chunks_mut::<4>().0
                                     {
                                         chunk.copy_from_slice(&fill_bytes);
                                     }

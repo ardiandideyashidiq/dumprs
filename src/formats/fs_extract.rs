@@ -386,20 +386,20 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
             debug!(partition = part_name, dir = rel_path, "erofs.mkdir");
         } else if entry.inode.is_file() {
             files_to_extract.push((entry.inode, target));
-        } else if entry.inode.is_symlink() {
-            if let Ok(link_target) = fs.read_link_inode(entry.inode) {
-                let link_str = link_target.to_string_lossy();
-                #[cfg(unix)]
-                {
-                    let _ = std::os::unix::fs::symlink(&*link_str, &target);
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = fs::write(&target, link_str.as_bytes());
-                }
-                symlinks_extracted += 1;
-                debug!(partition = part_name, symlink = %target.display(), "erofs.extract_symlink");
+        } else if entry.inode.is_symlink()
+            && let Ok(link_target) = fs.read_link_inode(entry.inode)
+        {
+            let link_str = link_target.to_string_lossy();
+            #[cfg(unix)]
+            {
+                let _ = std::os::unix::fs::symlink(&*link_str, &target);
             }
+            #[cfg(not(unix))]
+            {
+                let _ = fs::write(&target, link_str.as_bytes());
+            }
+            symlinks_extracted += 1;
+            debug!(partition = part_name, symlink = %target.display(), "erofs.extract_symlink");
         }
     }
     let files_extracted = symlinks_extracted + files_to_extract.len() as u64;
@@ -669,7 +669,7 @@ fn extract_ext4_file_buffered(
     }
     FS_COPY_BUF.with(|cell| -> Result<u64> {
         let mut copy_buf = cell.borrow_mut();
-        let buf_target = expected_size.min(32 * 1024 * 1024).max(4 * 1024 * 1024);
+        let buf_target = expected_size.clamp(4 * 1024 * 1024, 32 * 1024 * 1024);
         if copy_buf.len() < buf_target {
             copy_buf.resize(buf_target, 0);
         }

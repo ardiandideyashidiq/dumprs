@@ -184,7 +184,7 @@ pub fn extract_android_ota_payload_bytes(mmap: &[u8], output_dir: &Path) -> Resu
         };
 
         if let Err(e) = parse_partition_operations(
-            &mmap,
+            mmap,
             data_offset,
             partition,
             part_size,

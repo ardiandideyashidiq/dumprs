@@ -515,8 +515,7 @@ fn test_bootimg_ramdisk_cpio_symlink() {
     kernel_data.resize(page_size as usize, 0);
 
     cpio.resize(
-        ((ramdisk_size as usize + page_size as usize - 1) / page_size as usize)
-            * page_size as usize,
+        (ramdisk_size as usize).div_ceil(page_size as usize) * page_size as usize,
         0,
     );
 
@@ -605,7 +604,7 @@ ro.sf.lcd_density=480
         info.tran_os_build.as_deref(),
         Some("X6812B-H6912KL-R-OP-241128V1218")
     );
-    assert_eq!(info.tran_os_version.as_deref(), Some("xos7.6.0"));
+    assert_eq!(info.tran_os_version.as_deref(), Some("7.6.0"));
     assert_eq!(
         info.kernel_version.as_deref(),
         Some("4.14.186-g911263112f80-dirty")
@@ -638,11 +637,11 @@ ro.sf.lcd_density=480
     assert!(readme.contains("- CPU abilist: arm64-v8a,armeabi-v7a,armeabi"));
     assert!(readme.contains("- A/B device: true"));
     assert!(readme.contains("- Treble device: true"));
-    assert!(readme.contains("- Screen density: 480"));
+    assert!(readme.contains("- Display: 480 dpi"));
     assert!(readme.contains("- Android version: 11"));
     assert!(readme.contains("- Android build: RP1A.200720.011"));
-    assert!(readme.contains("- TranOS build: X6812B-H6912KL-R-OP-241128V1218"));
-    assert!(readme.contains("- TranOS version: xos7.6.0"));
+    assert!(readme.contains("- XOS build: X6812B-H6912KL-R-OP-241128V1218"));
+    assert!(readme.contains("- TranOS version: 7.6.0"));
     assert!(readme.contains("- Security patch: 2023-10-05"));
     assert!(readme.contains("- Kernel version: 4.14.186-g911263112f80-dirty"));
     assert!(readme.contains(

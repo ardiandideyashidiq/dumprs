@@ -46,7 +46,7 @@ fn align_to(val: u64, align: u64) -> u64 {
     if align == 0 {
         val
     } else {
-        ((val + align - 1) / align) * align
+        val.div_ceil(align) * align
     }
 }
 
