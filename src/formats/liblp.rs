@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use byteorder::{LittleEndian, ReadBytesExt};
 use indicatif::{HumanBytes, HumanDuration};
 use memmap2::Mmap;
@@ -114,7 +114,9 @@ pub fn parse_lp_single_extents(meta_slice: &[u8]) -> Result<Vec<(String, usize, 
         let entry_bytes = &tables_data[entry_start..entry_start + part_entry_sz];
         let name_bytes = &entry_bytes[0..36];
         let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(36);
-        let name = String::from_utf8_lossy(&name_bytes[..name_len]).trim().to_string();
+        let name = String::from_utf8_lossy(&name_bytes[..name_len])
+            .trim()
+            .to_string();
         let mut cursor = &entry_bytes[36..];
         let attributes = cursor.read_u32::<LittleEndian>()?;
         let first_extent_index = cursor.read_u32::<LittleEndian>()?;
@@ -189,8 +191,9 @@ pub fn parse_lp_single_extents(meta_slice: &[u8]) -> Result<Vec<(String, usize, 
 pub fn lpunpack(super_image_path: &Path, output_dir: &Path) -> Result<()> {
     let start_time = Instant::now();
     if !output_dir.exists() {
-        fs::create_dir_all(output_dir)
-            .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
+        fs::create_dir_all(output_dir).with_context(|| {
+            format!("Failed to create output directory {}", output_dir.display())
+        })?;
     }
     let raw_meta_len = fs::metadata(super_image_path).map(|m| m.len()).unwrap_or(0) as usize;
     let resolved: Option<(Arc<Mmap>, usize, usize, std::path::PathBuf)> =
@@ -318,7 +321,9 @@ pub fn lpunpack(super_image_path: &Path, output_dir: &Path) -> Result<()> {
         let entry_bytes = &tables_data[entry_start..entry_start + part_entry_sz];
         let name_bytes = &entry_bytes[0..36];
         let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(36);
-        let name = String::from_utf8_lossy(&name_bytes[..name_len]).trim().to_string();
+        let name = String::from_utf8_lossy(&name_bytes[..name_len])
+            .trim()
+            .to_string();
 
         let mut cursor = &entry_bytes[36..];
         let attributes = cursor.read_u32::<LittleEndian>()?;
@@ -416,7 +421,12 @@ pub fn lpunpack(super_image_path: &Path, output_dir: &Path) -> Result<()> {
             .create(true)
             .truncate(false)
             .open(&out_img_path)
-            .with_context(|| format!("Failed to create partition image {}", out_img_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to create partition image {}",
+                    out_img_path.display()
+                )
+            })?;
 
         if let Some((_, ref spans)) = sparse_index {
             out_file.set_len(0)?;
@@ -424,7 +434,11 @@ pub fn lpunpack(super_image_path: &Path, output_dir: &Path) -> Result<()> {
             for e_idx in 0..part.num_extents {
                 let extent_idx = (part.first_extent_index + e_idx) as usize;
                 if extent_idx >= extents.len() {
-                    bail!("Extent index {} out of bounds ({})", extent_idx, extents.len());
+                    bail!(
+                        "Extent index {} out of bounds ({})",
+                        extent_idx,
+                        extents.len()
+                    );
                 }
                 let extent = extents[extent_idx];
                 if extent.target_type != LP_TARGET_TYPE_LINEAR {
@@ -441,7 +455,11 @@ pub fn lpunpack(super_image_path: &Path, output_dir: &Path) -> Result<()> {
             if part.num_extents == 1 {
                 let extent_idx = part.first_extent_index as usize;
                 if extent_idx >= extents.len() {
-                    bail!("Extent index {} out of bounds ({})", extent_idx, extents.len());
+                    bail!(
+                        "Extent index {} out of bounds ({})",
+                        extent_idx,
+                        extents.len()
+                    );
                 }
                 let extent = extents[extent_idx];
                 if extent.target_type == LP_TARGET_TYPE_LINEAR {
@@ -475,7 +493,11 @@ pub fn lpunpack(super_image_path: &Path, output_dir: &Path) -> Result<()> {
             for e_idx in 0..part.num_extents {
                 let extent_idx = (part.first_extent_index + e_idx) as usize;
                 if extent_idx >= extents.len() {
-                    bail!("Extent index {} out of bounds ({})", extent_idx, extents.len());
+                    bail!(
+                        "Extent index {} out of bounds ({})",
+                        extent_idx,
+                        extents.len()
+                    );
                 }
                 let extent = extents[extent_idx];
                 if extent.target_type != LP_TARGET_TYPE_LINEAR {

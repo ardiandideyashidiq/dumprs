@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use byteorder::{BigEndian, ReadBytesExt};
 use indicatif::HumanBytes;
 use memmap2::Mmap;
@@ -16,8 +16,8 @@ pub mod update_engine {
     include!(concat!(env!("OUT_DIR"), "/chromeos_update_engine.rs"));
 }
 
-use update_engine::install_operation::Type as OpType;
 use update_engine::DeltaArchiveManifest;
+use update_engine::install_operation::Type as OpType;
 
 const BRILLO_MAGIC: &[u8; 4] = b"CrAU";
 const BLOCK_SIZE: u64 = 4096;
@@ -154,11 +154,7 @@ pub fn extract_android_ota_payload_bytes(mmap: &[u8], output_dir: &Path) -> Resu
         header.header_size + header.manifest_len + header.metadata_signature_len as u64;
     let check_hashes = tracing::enabled!(tracing::Level::DEBUG);
 
-    let total_output_bytes: u64 = manifest
-        .partitions
-        .iter()
-        .map(compute_partition_size)
-        .sum();
+    let total_output_bytes: u64 = manifest.partitions.iter().map(compute_partition_size).sum();
 
     info!(
         partitions = manifest.partitions.len(),
@@ -278,7 +274,11 @@ fn parse_partition_operations(
             let start = (data_offset + op_offset) as usize;
             let end = start + (op_length as usize);
             if end > mmap.len() {
-                bail!("Operation data range {}..{} exceeds payload size", start, end);
+                bail!(
+                    "Operation data range {}..{} exceeds payload size",
+                    start,
+                    end
+                );
             }
             let blob = &mmap[start..end];
 

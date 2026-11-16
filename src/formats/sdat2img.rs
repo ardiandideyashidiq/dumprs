@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use indicatif::HumanBytes;
 use memmap2::Mmap;
 use std::cell::RefCell;
@@ -45,7 +45,11 @@ fn parse_rangeset_into(
         parsed += 2;
     }
     if parsed != count {
-        bail!("Rangeset count mismatch: expected {}, got {}", count, parsed);
+        bail!(
+            "Rangeset count mismatch: expected {}, got {}",
+            count,
+            parsed
+        );
     }
     Ok(())
 }
@@ -91,7 +95,12 @@ fn parse_transfer_list(path: &Path) -> Result<(u32, u64, u64, Vec<(u64, u64)>)> 
             if let Some(range_arg) = parts.next() {
                 parse_rangeset_into(range_arg, cmd == "new", &mut new_ranges, &mut max_block)?;
             }
-        } else if !cmd.as_bytes().first().map(|b| b.is_ascii_digit()).unwrap_or(false) {
+        } else if !cmd
+            .as_bytes()
+            .first()
+            .map(|b| b.is_ascii_digit())
+            .unwrap_or(false)
+        {
             debug!(command = cmd, "sdat2img.unknown_command");
         }
     }
@@ -263,7 +272,11 @@ pub fn sdat2img(
                 byte_count
             );
         }
-        write_at(&output_file, &mmap[src_offset..src_offset + byte_count], target_pos)?;
+        write_at(
+            &output_file,
+            &mmap[src_offset..src_offset + byte_count],
+            target_pos,
+        )?;
         src_offset += byte_count;
         max_written = max_written.max(target_pos + byte_count as u64);
         pb.inc(byte_count as u64);

@@ -1,14 +1,13 @@
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing_indicatif::IndicatifWriter;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
-static MULTI_PROGRESS: LazyLock<MultiProgress> = LazyLock::new(|| {
-    MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(12))
-});
+static MULTI_PROGRESS: LazyLock<MultiProgress> =
+    LazyLock::new(|| MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(12)));
 
 static BYTE_STYLE: LazyLock<ProgressStyle> = LazyLock::new(|| {
     ProgressStyle::with_template(
@@ -26,8 +25,8 @@ pub fn get_multi_progress() -> &'static MultiProgress {
 }
 
 pub fn init_logging() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("dumprs=info,warn"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("dumprs=info,warn"));
 
     let writer =
         IndicatifWriter::<tracing_indicatif::writer::Stderr>::new(get_multi_progress().clone());

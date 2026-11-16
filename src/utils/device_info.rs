@@ -24,6 +24,12 @@ pub struct DeviceInfo {
     pub security_patch: Option<String>,
     pub kernel_version: Option<String>,
     pub fingerprint: Option<String>,
+    // Android device tree / makefile configuration properties
+    pub device_codename: Option<String>,
+    pub product_brand: Option<String>,
+    pub product_model: Option<String>,
+    pub manufacturer: Option<String>,
+    pub gms_clientid_base: Option<String>,
 }
 
 #[derive(Default)]
@@ -48,10 +54,8 @@ impl PropStore {
 
     fn get_any(&self, prop_names: &[&str]) -> Option<&str> {
         for &name in prop_names {
-            if let Some(val) = self.get(name) {
-                if !val.is_empty() {
-                    return Some(val);
-                }
+            if let Some(val) = self.get(name).filter(|v| !v.is_empty()) {
+                return Some(val);
             }
         }
         None
@@ -60,10 +64,10 @@ impl PropStore {
     fn get_in_partition(&self, partition_pattern: &str, prop_name: &str) -> Option<&str> {
         if let Some(list) = self.props.get(prop_name) {
             for (part, val) in list {
-                if part == partition_pattern || part.contains(partition_pattern) {
-                    if !val.is_empty() {
-                        return Some(val.as_str());
-                    }
+                if (part == partition_pattern || part.contains(partition_pattern))
+                    && !val.is_empty()
+                {
+                    return Some(val.as_str());
                 }
             }
         }
@@ -123,14 +127,17 @@ impl DeviceInfo {
         }
 
         // 2. Discover any additional *.prop files (up to depth 4, skipping temp directories)
-        let walker = WalkDir::new(dump_dir).max_depth(4).into_iter().filter_entry(|e| {
-            if e.depth() == 1 && e.file_type().is_dir() {
-                let name = e.file_name();
-                name != "temp_extracted_archive" && name != "temp_raw_images"
-            } else {
-                true
-            }
-        });
+        let walker = WalkDir::new(dump_dir)
+            .max_depth(4)
+            .into_iter()
+            .filter_entry(|e| {
+                if e.depth() == 1 && e.file_type().is_dir() {
+                    let name = e.file_name();
+                    name != "temp_extracted_archive" && name != "temp_raw_images"
+                } else {
+                    true
+                }
+            });
 
         for entry in walker.filter_map(|e| e.ok()) {
             if entry.file_type().is_file() {
@@ -172,23 +179,19 @@ impl DeviceInfo {
                 "ro.product.odm.brand",
                 "ro.product.manufacturer",
             ])
-            .or_else(|| {
-                fingerprint.as_deref().and_then(|fp| fp.split('/').next())
-            })
+            .or_else(|| fingerprint.as_deref().and_then(|fp| fp.split('/').next()))
             .map(String::from);
 
         // Parse Model
         let model = store
             .get_any(&[
+                "ro.product.vendor.model",
+                "ro.product.model",
+                "ro.product.product.model",
+                "ro.product.system.model",
                 "ro.product.odm.model",
                 "ro.product.product.device",
                 "ro.product.vendor.device",
-                "ro.product.device",
-                "ro.product.odm.device",
-                "ro.product.vendor.model",
-                "ro.product.model",
-                "ro.product.system.model",
-                "ro.product.product.model",
             ])
             .map(|s| s.replace(' ', "-"))
             .or_else(|| {
@@ -216,7 +219,11 @@ impl DeviceInfo {
                 let inc = store.get("ro.build.version.incremental").unwrap_or("");
                 let tags = store.get("ro.build.tags").unwrap_or("release-keys");
                 if !brand_str.is_empty() && !model_str.is_empty() {
-                    Some(format!("{brand_str}-{model_str} {rel} {id} {inc} {tags}").trim().to_string())
+                    Some(
+                        format!("{brand_str}-{model_str} {rel} {id} {inc} {tags}")
+                            .trim()
+                            .to_string(),
+                    )
                 } else {
                     None
                 }
@@ -337,10 +344,9 @@ impl DeviceInfo {
                 "ColorOS"
             };
             (Some(name.to_string()), Some(ver.to_string()))
-        } else if let Some(ver) = store.get_any(&[
-            "ro.mi.os.version.incremental",
-            "ro.miui.ui.version.name",
-        ]) {
+        } else if let Some(ver) =
+            store.get_any(&["ro.mi.os.version.incremental", "ro.miui.ui.version.name"])
+        {
             (Some("HyperOS/MIUI".to_string()), Some(ver.to_string()))
         } else if let Some(ver) = store.get("ro.build.version.oneui") {
             (Some("One UI".to_string()), Some(ver.to_string()))
@@ -352,6 +358,74 @@ impl DeviceInfo {
 
         // Extract Kernel Version from boot/kernel
         let kernel_version = extract_kernel_version(dump_dir);
+
+        // Parse Android device tree / makefile configuration properties (matching aospdtgen / sebaubuntu_libs)
+        let device_codename = store
+            .get_any(&[
+                "ro.product.device",
+                "ro.product.system.device",
+                "ro.product.vendor.device",
+                "ro.product.product.device",
+                "ro.product.system_ext.device",
+                "ro.product.odm.device",
+                "ro.build.product",
+            ])
+            .map(String::from)
+            .or_else(|| {
+                fingerprint.as_deref().and_then(|fp| {
+                    let part = fp.split('/').nth(1)?;
+                    part.split('-').next().map(String::from)
+                })
+            });
+
+        let product_brand = store
+            .get_any(&[
+                "ro.product.brand",
+                "ro.product.system.brand",
+                "ro.product.vendor.brand",
+                "ro.product.product.brand",
+                "ro.product.odm.brand",
+            ])
+            .map(|s| s.to_ascii_lowercase())
+            .or_else(|| brand.as_ref().map(|b| b.to_ascii_lowercase()));
+
+        let product_model = store
+            .get_any(&[
+                "ro.product.model",
+                "ro.product.system.model",
+                "ro.product.vendor.model",
+                "ro.product.product.model",
+                "ro.product.odm.model",
+            ])
+            .map(String::from)
+            .or_else(|| model.clone());
+
+        let manufacturer = store
+            .get_any(&[
+                "ro.product.manufacturer",
+                "ro.product.system.manufacturer",
+                "ro.product.vendor.manufacturer",
+                "ro.product.product.manufacturer",
+                "ro.product.odm.manufacturer",
+            ])
+            .map(|s| {
+                s.split_whitespace()
+                    .next()
+                    .unwrap_or(s)
+                    .to_ascii_lowercase()
+            })
+            .or_else(|| product_brand.clone());
+
+        let gms_clientid_base = store
+            .get_any(&[
+                "ro.com.google.clientidbase",
+                "ro.com.google.clientidbase.ms",
+                "ro.com.google.clientidbase.am",
+                "ro.com.google.clientidbase.yt",
+                "ro.com.google.clientidbase.gmm",
+            ])
+            .map(String::from)
+            .or_else(|| manufacturer.as_ref().map(|m| format!("android-{m}")));
 
         Self {
             description,
@@ -371,6 +445,11 @@ impl DeviceInfo {
             security_patch,
             kernel_version,
             fingerprint,
+            device_codename,
+            product_brand,
+            product_model,
+            manufacturer,
+            gms_clientid_base,
         }
     }
 
@@ -429,6 +508,26 @@ impl DeviceInfo {
             md.push_str(&format!("- Fingerprint: {v}\n"));
         }
 
+        if self.device_codename.is_some() || self.manufacturer.is_some() {
+            md.push_str("\n### Android Device Tree Configuration\n```makefile\n");
+            if let Some(v) = &self.device_codename {
+                md.push_str(&format!("PRODUCT_DEVICE := {v}\n"));
+            }
+            if let Some(v) = &self.product_brand {
+                md.push_str(&format!("PRODUCT_BRAND := {v}\n"));
+            }
+            if let Some(v) = &self.product_model {
+                md.push_str(&format!("PRODUCT_MODEL := {v}\n"));
+            }
+            if let Some(v) = &self.manufacturer {
+                md.push_str(&format!("PRODUCT_MANUFACTURER := {v}\n"));
+            }
+            if let Some(v) = &self.gms_clientid_base {
+                md.push_str(&format!("\nPRODUCT_GMS_CLIENTID_BASE := {v}\n"));
+            }
+            md.push_str("```\n");
+        }
+
         md
     }
 
@@ -451,7 +550,9 @@ fn extract_kernel_version(dump_dir: &Path) -> Option<String> {
         if kp.is_file() {
             if let Ok(mut file) = File::open(kp) {
                 let mut magic = [0u8; 4];
-                if file.read_exact(&mut magic).is_ok() && file.seek(std::io::SeekFrom::Start(0)).is_ok() {
+                if file.read_exact(&mut magic).is_ok()
+                    && file.seek(std::io::SeekFrom::Start(0)).is_ok()
+                {
                     if magic[0..2] == [0x1f, 0x8b] {
                         let gz = GzDecoder::new(file);
                         if let Some(v) = scan_for_linux_version(gz) {
@@ -501,7 +602,12 @@ fn scan_for_linux_version<R: Read>(mut reader: R) -> Option<String> {
             let ver_bytes = &remainder[..end];
             if !ver_bytes.is_empty() {
                 let ver_str = String::from_utf8_lossy(ver_bytes).trim().to_string();
-                if ver_str.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                if ver_str
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+                {
                     return Some(ver_str);
                 }
             }

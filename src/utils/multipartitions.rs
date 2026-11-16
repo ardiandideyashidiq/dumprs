@@ -3,7 +3,6 @@ use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
-
 use crate::formats::liblp::lpunpack;
 use crate::formats::payload::extract_android_ota_payload;
 pub fn extract_payload(image: &Path, output_dir: &Path) -> Result<()> {

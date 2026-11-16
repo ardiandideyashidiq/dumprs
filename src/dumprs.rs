@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use indicatif::{HumanBytes, HumanDuration};
 use std::collections::HashMap;
 use std::fs;

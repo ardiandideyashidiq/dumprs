@@ -4,10 +4,13 @@ use std::env;
 use std::path::PathBuf;
 
 use ::dumprs::utils::progress::init_logging;
-use ::dumprs::{dumprs, DumpOptions};
+use ::dumprs::{DumpOptions, dumprs};
 
 #[derive(Parser, Debug)]
-#[command(name = "dumprs", about = "Dumprs - High-performance Android firmware extractor")]
+#[command(
+    name = "dumprs",
+    about = "Dumprs - High-performance Android firmware extractor"
+)]
 struct Args {
     /// Path to a device OTA or firmware archive
     #[arg(value_name = "FILE")]

@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::GzDecoder;
 use std::borrow::Cow;
@@ -100,7 +100,10 @@ fn extract_standard_bootimg(mmap: &[u8], output_path: &Path) -> Result<()> {
         let fixed_page_size = 4096u64;
         info.page_size = 4096;
         let cmdline_buf = &cursor[..1536.min(cursor.len())];
-        let end = cmdline_buf.iter().position(|&b| b == 0).unwrap_or(cmdline_buf.len());
+        let end = cmdline_buf
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(cmdline_buf.len());
         info.cmdline = String::from_utf8_lossy(&cmdline_buf[..end]).to_string();
 
         kernel_offset = fixed_page_size;
@@ -357,7 +360,9 @@ fn unpack_cpio(data: &[u8], out_dir: &Path) -> Result<()> {
         let file_type = mode & 0o170000;
         if file_type == 0o120000 {
             // Symlink
-            let link_target = std::str::from_utf8(file_buf).unwrap_or("").trim_end_matches('\0');
+            let link_target = std::str::from_utf8(file_buf)
+                .unwrap_or("")
+                .trim_end_matches('\0');
             if !link_target.is_empty() {
                 #[cfg(unix)]
                 {
@@ -378,7 +383,10 @@ fn unpack_cpio(data: &[u8], out_dir: &Path) -> Result<()> {
             }
             #[cfg(unix)]
             if (mode & 0o7777) != 0 {
-                let _ = fs::set_permissions(&target_path, std::fs::Permissions::from_mode(mode & 0o7777));
+                let _ = fs::set_permissions(
+                    &target_path,
+                    std::fs::Permissions::from_mode(mode & 0o7777),
+                );
             }
         }
     }

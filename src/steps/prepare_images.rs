@@ -9,13 +9,11 @@ use tracing::{debug, info};
 use crate::formats::sparse::unsparse_file;
 use crate::utils::files::{get_recursive_files_list, move_or_copy};
 use crate::utils::firmware::{
-    is_candidate_firmware_path, is_excluded_partition_name, is_scatter_filename,
-    sniff_file_header_kind, strip_slot_suffix, HeaderKind, ScatterInfo,
+    HeaderKind, ScatterInfo, is_candidate_firmware_path, is_excluded_partition_name,
+    is_scatter_filename, sniff_file_header_kind, strip_slot_suffix,
 };
 use crate::utils::multipartitions::get_multipartition_rules;
-use crate::utils::partitions::{
-    correct_ab_filenames, fix_aliases, get_partition_names_with_ab,
-};
+use crate::utils::partitions::{correct_ab_filenames, fix_aliases, get_partition_names_with_ab};
 use crate::utils::raw_image::get_raw_image;
 use crate::utils::sparsed_images::prepare_sparsed_images;
 

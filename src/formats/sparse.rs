@@ -1,4 +1,5 @@
-use anyhow::{bail, Context, Result};
+use crate::utils::progress::ByteProgress;
+use anyhow::{Context, Result, bail};
 use byteorder::{LittleEndian, ReadBytesExt};
 use indicatif::{HumanBytes, HumanDuration};
 use memmap2::Mmap;
@@ -11,7 +12,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 use tracing::{debug, info};
-use crate::utils::progress::ByteProgress;
 
 pub const SPARSE_MAGIC: u32 = 0xed26_ff3a;
 const CHUNK_TYPE_RAW: u16 = 0xcac1;
@@ -110,7 +110,6 @@ impl SharedAnonSlice {
         }
     }
 
-
     /// # Safety
     /// Caller must ensure `start..end` has already been completely written and is no longer mutated.
     #[inline]
@@ -150,7 +149,11 @@ impl SharedAnonSlice {
             .checked_add(len)
             .context("anon slice read_exact_at overflow")?;
         if end > self.len {
-            bail!("anon slice read_exact_at out of bounds ({} > {})", end, self.len);
+            bail!(
+                "anon slice read_exact_at out of bounds ({} > {})",
+                end,
+                self.len
+            );
         }
         // SAFETY: `start..end` is within `0..self.len` and exclusively owned by this chunk.
         let dst = unsafe { std::slice::from_raw_parts_mut(self.ptr.add(start), len) };
@@ -236,7 +239,13 @@ pub fn peek_sparse_prefix<R: Read>(mut reader: R, want_bytes: usize) -> Result<V
         }
         Ok(())
     };
-    ensure(&mut pos, &mut filled, &mut buf, &mut reader, hdr.file_hdr_sz)?;
+    ensure(
+        &mut pos,
+        &mut filled,
+        &mut buf,
+        &mut reader,
+        hdr.file_hdr_sz,
+    )?;
     pos += hdr.file_hdr_sz;
 
     let mut out = Vec::with_capacity(want_bytes);
@@ -244,7 +253,13 @@ pub fn peek_sparse_prefix<R: Read>(mut reader: R, want_bytes: usize) -> Result<V
         if out.len() >= want_bytes {
             break;
         }
-        ensure(&mut pos, &mut filled, &mut buf, &mut reader, hdr.chunk_hdr_sz)?;
+        ensure(
+            &mut pos,
+            &mut filled,
+            &mut buf,
+            &mut reader,
+            hdr.chunk_hdr_sz,
+        )?;
         let ch = &buf[pos..pos + hdr.chunk_hdr_sz];
         let chunk_type = u16::from_le_bytes(ch[0..2].try_into().unwrap());
         let chunk_sz = u32::from_le_bytes(ch[4..8].try_into().unwrap()) as usize;
@@ -532,14 +547,21 @@ fn decode_sparse_mmap(
 
     for _ in 0..hdr.total_chunks {
         if in_offset + hdr.chunk_hdr_sz > mmap.len() {
-            bail!("Unexpected EOF reading sparse chunk header in {}", file_name);
+            bail!(
+                "Unexpected EOF reading sparse chunk header in {}",
+                file_name
+            );
         }
         let ch = &mmap[in_offset..in_offset + hdr.chunk_hdr_sz];
         let chunk_type = u16::from_le_bytes(ch[0..2].try_into().unwrap());
         let chunk_sz = u32::from_le_bytes(ch[4..8].try_into().unwrap()) as u64;
         let total_sz = u32::from_le_bytes(ch[8..12].try_into().unwrap()) as usize;
         if total_sz < hdr.chunk_hdr_sz || in_offset + total_sz > mmap.len() {
-            bail!("Invalid sparse chunk total_sz {} in {}", total_sz, file_name);
+            bail!(
+                "Invalid sparse chunk total_sz {} in {}",
+                total_sz,
+                file_name
+            );
         }
 
         let payload_start = in_offset + hdr.chunk_hdr_sz;
@@ -559,12 +581,15 @@ fn decode_sparse_mmap(
                 if payload_len < 4 {
                     bail!("FILL chunk payload too small in {}", file_name);
                 }
-                let fill_bytes: [u8; 4] = mmap[payload_start..payload_start + 4].try_into().unwrap();
+                let fill_bytes: [u8; 4] =
+                    mmap[payload_start..payload_start + 4].try_into().unwrap();
                 let fill_val = u32::from_le_bytes(fill_bytes);
                 if fill_val == 0 {
                     if out_bytes >= HOLE_SEEK_THRESHOLD {
                         writer.flush()?;
-                        writer.get_mut().seek(SeekFrom::Start(out_offset + out_bytes))?;
+                        writer
+                            .get_mut()
+                            .seek(SeekFrom::Start(out_offset + out_bytes))?;
                     } else {
                         let mut rem = out_bytes as usize;
                         while rem > 0 {
@@ -593,7 +618,9 @@ fn decode_sparse_mmap(
             CHUNK_TYPE_DONT_CARE => {
                 if out_bytes > 0 {
                     writer.flush()?;
-                    writer.get_mut().seek(SeekFrom::Start(out_offset + out_bytes))?;
+                    writer
+                        .get_mut()
+                        .seek(SeekFrom::Start(out_offset + out_bytes))?;
                     out_offset += out_bytes;
                     pb.inc(out_bytes);
                 }
@@ -620,14 +647,21 @@ fn decode_sparse_mmap_at(
 
     for _ in 0..hdr.total_chunks {
         if in_offset + hdr.chunk_hdr_sz > mmap.len() {
-            bail!("Unexpected EOF reading sparse chunk header in {}", file_name);
+            bail!(
+                "Unexpected EOF reading sparse chunk header in {}",
+                file_name
+            );
         }
         let ch = &mmap[in_offset..in_offset + hdr.chunk_hdr_sz];
         let chunk_type = u16::from_le_bytes(ch[0..2].try_into().unwrap());
         let chunk_sz = u32::from_le_bytes(ch[4..8].try_into().unwrap()) as u64;
         let total_sz = u32::from_le_bytes(ch[8..12].try_into().unwrap()) as usize;
         if total_sz < hdr.chunk_hdr_sz || in_offset + total_sz > mmap.len() {
-            bail!("Invalid sparse chunk total_sz {} in {}", total_sz, file_name);
+            bail!(
+                "Invalid sparse chunk total_sz {} in {}",
+                total_sz,
+                file_name
+            );
         }
 
         let payload_start = in_offset + hdr.chunk_hdr_sz;
@@ -765,7 +799,8 @@ pub fn extract_stream_or_sparse_pipelined<R: Read + Send>(
             pos: 0,
         };
         let mut work_buf = vec![0u8; 1024 * 1024];
-        let res = extract_stream_or_sparse(&mut chan_reader, out_file, try_sparse, &mut work_buf, pb);
+        let res =
+            extract_stream_or_sparse(&mut chan_reader, out_file, try_sparse, &mut work_buf, pb);
         drop(chan_reader);
         producer
             .join()
@@ -1360,9 +1395,9 @@ pub fn unsparse_chunks(chunk_paths: &[PathBuf], dst_path: &Path) -> Result<()> {
             .with_context(|| format!("Failed to create output {}", dst_path.display()))?;
         let max_written = AtomicU64::new(0);
 
-        chunk_paths.par_iter().try_for_each_init(
-            Vec::new,
-            |fill_buf, chunk| -> Result<()> {
+        chunk_paths
+            .par_iter()
+            .try_for_each_init(Vec::new, |fill_buf, chunk| -> Result<()> {
                 let chunk_name = chunk
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -1382,8 +1417,7 @@ pub fn unsparse_chunks(chunk_paths: &[PathBuf], dst_path: &Path) -> Result<()> {
                 drop(file);
                 let _ = fs::remove_file(chunk);
                 Ok(())
-            },
-        )?;
+            })?;
 
         let final_size = max_written.load(Ordering::Relaxed);
         dst_file.set_len(final_size)?;

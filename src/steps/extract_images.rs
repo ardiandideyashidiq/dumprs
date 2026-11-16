@@ -9,17 +9,23 @@ use crate::formats::bootimg::extract_bootimg;
 use crate::formats::fs_extract::extract_filesystem;
 use crate::utils::files::{hardlink_or_copy, logical_image_size, was_early_extracted};
 use crate::utils::firmware::{
-    is_excluded_partition_name, is_scatter_filename, matches_partition_filter,
-    sniff_file_header_kind, HeaderKind, ScatterInfo,
+    HeaderKind, ScatterInfo, is_excluded_partition_name, is_scatter_filename,
+    matches_partition_filter, sniff_file_header_kind,
 };
-use crate::utils::partitions::{get_partition_names, get_partition_type, PartitionType};
+use crate::utils::partitions::{PartitionType, get_partition_names, get_partition_type};
 pub fn extract_images(
     raw_images_path: &Path,
     output_path: &Path,
     filter_partitions: &[String],
     resume: bool,
 ) -> Result<()> {
-    extract_images_with_cleanup(raw_images_path, output_path, filter_partitions, resume, false)
+    extract_images_with_cleanup(
+        raw_images_path,
+        output_path,
+        filter_partitions,
+        resume,
+        false,
+    )
 }
 
 pub fn extract_images_with_cleanup(
@@ -129,7 +135,6 @@ pub fn extract_images_with_cleanup(
             }
         });
 
-
     extract_extra_firmware_and_scatter(
         raw_images_path,
         output_path,
@@ -217,7 +222,12 @@ fn extract_extra_firmware_and_scatter(
         {
             continue;
         }
-        items.push((fname.to_string(), path, file_size, ExtraItemKind::Image(kind)));
+        items.push((
+            fname.to_string(),
+            path,
+            file_size,
+            ExtraItemKind::Image(kind),
+        ));
     }
 
     if items.is_empty() {

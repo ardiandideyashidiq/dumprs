@@ -10,7 +10,12 @@ use crate::formats::sparse::unsparse_file;
 use crate::utils::files::move_or_copy;
 use crate::utils::progress::ByteProgress;
 
-fn copy_with_progress<R: Read>(mut reader: R, out_path: &Path, label: &str, total_hint: u64) -> Result<u64> {
+fn copy_with_progress<R: Read>(
+    mut reader: R,
+    out_path: &Path,
+    label: &str,
+    total_hint: u64,
+) -> Result<u64> {
     let output_file = File::create(out_path)
         .with_context(|| format!("Failed to create {}", out_path.display()))?;
     let mut writer = BufWriter::with_capacity(1024 * 1024, output_file);
@@ -73,10 +78,8 @@ pub fn get_raw_image(partition: &str, files_path: &Path, output_image_path: &Pat
         info!(partition, input_size = %HumanBytes(br_size), "raw_image.brotli.decompress");
         let input_file = File::open(&brotli_image)
             .with_context(|| format!("Failed to open {}", brotli_image.display()))?;
-        let reader = brotli::Decompressor::new(
-            BufReader::with_capacity(256 * 1024, input_file),
-            256 * 1024,
-        );
+        let reader =
+            brotli::Decompressor::new(BufReader::with_capacity(256 * 1024, input_file), 256 * 1024);
         copy_with_progress(reader, &dat_image, partition, br_size.saturating_mul(2))?;
         let _ = fs::remove_file(&brotli_image);
     }

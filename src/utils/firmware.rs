@@ -356,8 +356,7 @@ pub fn sniff_header_kind(head: &[u8]) -> HeaderKind {
     {
         return HeaderKind::Filesystem;
     }
-    if head.len() >= 1082
-        && u16::from_le_bytes(head[1080..1082].try_into().unwrap()) == EXT4_MAGIC
+    if head.len() >= 1082 && u16::from_le_bytes(head[1080..1082].try_into().unwrap()) == EXT4_MAGIC
     {
         return HeaderKind::Filesystem;
     }
@@ -412,7 +411,11 @@ pub fn sniff_file_header_kind(path: &Path) -> Result<HeaderKind> {
     Ok(sniff_header_kind(&buf[..filled]))
 }
 
-pub fn matches_partition_filter(filter_partitions: &[String], filename: &str, scatter: &ScatterInfo) -> bool {
+pub fn matches_partition_filter(
+    filter_partitions: &[String],
+    filename: &str,
+    scatter: &ScatterInfo,
+) -> bool {
     if filter_partitions.is_empty() {
         return true;
     }
@@ -497,7 +500,10 @@ mod tests {
     fn sniffs_firmware_and_non_partition_headers() {
         assert_eq!(sniff_header_kind(b"ANDROID!rest"), HeaderKind::BootImage);
         assert_eq!(sniff_header_kind(b"VNDRBOOTrest"), HeaderKind::BootImage);
-        assert_eq!(sniff_header_kind(b"AVB0\x00\x00\x00\x01"), HeaderKind::FirmwareRaw);
+        assert_eq!(
+            sniff_header_kind(b"AVB0\x00\x00\x00\x01"),
+            HeaderKind::FirmwareRaw
+        );
         assert_eq!(
             sniff_header_kind(&[0xd7, 0xb7, 0xab, 0x1e, 0, 0, 0, 0]),
             HeaderKind::FirmwareRaw
@@ -525,8 +531,14 @@ mod tests {
             sniff_header_kind(b"MTK_DOWNLOAD_AGENT\x00"),
             HeaderKind::NonPartition
         );
-        assert_eq!(sniff_header_kind(b"CATD\x04\x00\x00\x00"), HeaderKind::NonPartition);
-        assert_eq!(sniff_header_kind(b"gDla4\x00\x00\x00"), HeaderKind::NonPartition);
+        assert_eq!(
+            sniff_header_kind(b"CATD\x04\x00\x00\x00"),
+            HeaderKind::NonPartition
+        );
+        assert_eq!(
+            sniff_header_kind(b"gDla4\x00\x00\x00"),
+            HeaderKind::NonPartition
+        );
 
         let mut ext4 = vec![0u8; 2048];
         ext4[1080] = 0x53;

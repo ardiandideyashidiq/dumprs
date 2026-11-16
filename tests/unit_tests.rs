@@ -9,9 +9,8 @@ use dumprs::utils::files::{
     sort_files,
 };
 use dumprs::utils::partitions::{
-    correct_ab_filenames, fix_aliases, get_partition_name, get_partition_names,
+    PartitionType, correct_ab_filenames, fix_aliases, get_partition_name, get_partition_names,
     get_partition_names_with_ab, get_partition_names_with_alias, get_partition_type,
-    PartitionType,
 };
 use std::fs;
 use std::io::Cursor;
@@ -24,7 +23,10 @@ fn test_partitions_metadata() {
     assert_eq!(get_partition_name("NON-HLOS"), "modem");
     assert_eq!(get_partition_name("system"), "system");
 
-    assert_eq!(get_partition_type("system"), Some(PartitionType::Filesystem));
+    assert_eq!(
+        get_partition_type("system"),
+        Some(PartitionType::Filesystem)
+    );
     assert_eq!(get_partition_type("boot"), Some(PartitionType::Bootimage));
     assert_eq!(get_partition_type("dtbo"), Some(PartitionType::Raw));
     assert_eq!(get_partition_type("super"), Some(PartitionType::Logical));
@@ -263,7 +265,10 @@ fn test_bootimg_header_extraction() {
 
     assert!(out_dir.join("info.txt").exists());
     assert_eq!(fs::read(out_dir.join("kernel")).unwrap(), b"FAKEKERNEL");
-    assert_eq!(fs::read(out_dir.join("ramdisk.img")).unwrap(), b"FAKERAMDISKDATA");
+    assert_eq!(
+        fs::read(out_dir.join("ramdisk.img")).unwrap(),
+        b"FAKERAMDISKDATA"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -410,7 +415,14 @@ fn test_kdz_gpt_parsing() {
     data[e0 + 32..e0 + 40].copy_from_slice(&100u64.to_le_bytes()); // start_lba = 100
     data[e0 + 40..e0 + 48].copy_from_slice(&200u64.to_le_bytes()); // end_lba = 200
     // Name: "system" in UTF-16LE
-    let sys_u16 = [b's' as u16, b'y' as u16, b's' as u16, b't' as u16, b'e' as u16, b'm' as u16];
+    let sys_u16 = [
+        b's' as u16,
+        b'y' as u16,
+        b's' as u16,
+        b't' as u16,
+        b'e' as u16,
+        b'm' as u16,
+    ];
     for (i, &c) in sys_u16.iter().enumerate() {
         data[e0 + 56 + i * 2..e0 + 56 + i * 2 + 2].copy_from_slice(&c.to_le_bytes());
     }
@@ -443,14 +455,21 @@ fn test_bootimg_ramdisk_cpio_symlink() {
     let mut cpio = Vec::new();
     let mut hdr = format!(
         "070701{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
-        1, // ino
+        1,        // ino
         0o120777, // mode (symlink)
-        0, 0, 1, 0,
+        0,
+        0,
+        1,
+        0,
         6, // filesize
-        0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
         7, // namesize
         0  // check
-    ).into_bytes();
+    )
+    .into_bytes();
     hdr.resize(110, b'0');
     cpio.extend_from_slice(&hdr);
     cpio.extend_from_slice(b"bin/sh\0");
@@ -464,7 +483,8 @@ fn test_bootimg_ramdisk_cpio_symlink() {
     let mut trailer_hdr = format!(
         "070701{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
         2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 11, 0
-    ).into_bytes();
+    )
+    .into_bytes();
     trailer_hdr.resize(110, b'0');
     cpio.extend_from_slice(&trailer_hdr);
     cpio.extend_from_slice(b"TRAILER!!!\0");
@@ -494,7 +514,11 @@ fn test_bootimg_ramdisk_cpio_symlink() {
     let mut kernel_data = b"KERNELOK".to_vec();
     kernel_data.resize(page_size as usize, 0);
 
-    cpio.resize(((ramdisk_size as usize + page_size as usize - 1) / page_size as usize) * page_size as usize, 0);
+    cpio.resize(
+        ((ramdisk_size as usize + page_size as usize - 1) / page_size as usize)
+            * page_size as usize,
+        0,
+    );
 
     let mut img_data = Vec::new();
     img_data.extend_from_slice(&header);
@@ -519,8 +543,8 @@ fn test_bootimg_ramdisk_cpio_symlink() {
 #[test]
 fn test_device_info_and_readme_generation() {
     use dumprs::utils::device_info::DeviceInfo;
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use std::io::Write;
 
     let temp_dir = std::env::temp_dir().join("dumprs_test_device_info");
@@ -535,7 +559,10 @@ ro.build.description=sys_tssi_64_infinix-user 11 RP1A.200720.011 759119 release-
 ro.build.display.id=X6812B-H6912KL-R-OP-241128V1218
 ro.tranos.version=xos7.6.0
 ro.product.brand=Infinix
-ro.product.model=Infinix-X6812B
+ro.product.model=Infinix X6812B
+ro.product.device=X6812B
+ro.product.manufacturer=infinix
+ro.com.google.clientidbase=android-transsion
 ro.build.id=RP1A.200720.011
 ro.build.version.release=11
 ro.build.version.security_patch=2023-10-05
@@ -545,7 +572,11 @@ ro.treble.enabled=true
 ro.sf.lcd_density=480
 "#;
     fs::write(temp_dir.join("system/system/build.prop"), system_prop).unwrap();
-    fs::write(temp_dir.join("vendor/build.prop"), "ro.board.platform=mt6768\n").unwrap();
+    fs::write(
+        temp_dir.join("vendor/build.prop"),
+        "ro.board.platform=mt6768\n",
+    )
+    .unwrap();
     fs::write(
         temp_dir.join("product/build.prop"),
         "ro.product.build.fingerprint=Infinix/X6812B-OP/Infinix-X6812B:11/RP1A.200720.011/241128V1218:user/release-keys\n",
@@ -592,6 +623,12 @@ ro.sf.lcd_density=480
         Some("Infinix/X6812B-OP/Infinix-X6812B:11/RP1A.200720.011/241128V1218:user/release-keys")
     );
 
+    assert_eq!(info.device_codename.as_deref(), Some("X6812B"));
+    assert_eq!(info.product_brand.as_deref(), Some("infinix"));
+    assert_eq!(info.product_model.as_deref(), Some("Infinix X6812B"));
+    assert_eq!(info.manufacturer.as_deref(), Some("infinix"));
+    assert_eq!(info.gms_clientid_base.as_deref(), Some("android-transsion"));
+
     let readme = info.generate_readme();
     assert!(readme.contains("## FIRMWARE DUMP"));
     assert!(readme.contains("### sys_tssi_64_infinix-user 11 RP1A.200720.011 759119 release-keys"));
@@ -611,6 +648,11 @@ ro.sf.lcd_density=480
     assert!(readme.contains(
         "- Fingerprint: Infinix/X6812B-OP/Infinix-X6812B:11/RP1A.200720.011/241128V1218:user/release-keys"
     ));
+    assert!(readme.contains("PRODUCT_DEVICE := X6812B"));
+    assert!(readme.contains("PRODUCT_BRAND := infinix"));
+    assert!(readme.contains("PRODUCT_MODEL := Infinix X6812B"));
+    assert!(readme.contains("PRODUCT_MANUFACTURER := infinix"));
+    assert!(readme.contains("PRODUCT_GMS_CLIENTID_BASE := android-transsion"));
 
     // Test terminal rendering does not panic
     info.render_terminal();

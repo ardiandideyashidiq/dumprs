@@ -1,7 +1,7 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use backhand::{FilesystemReader, InnerNode};
-use erofs_rs::backend::SliceImage;
 use erofs_rs::EroFS;
+use erofs_rs::backend::SliceImage;
 use ext4_view::{Ext4, Ext4Read};
 use indicatif::{HumanBytes, HumanDuration};
 use memmap2::Mmap;
@@ -11,8 +11,8 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tracing::{debug, info};
 
@@ -27,8 +27,6 @@ const MTK_MAGIC_2: u32 = 0x5889_1689;
 thread_local! {
     static FS_COPY_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
-
-
 
 pub fn extract_filesystem(image_path: &Path, output_dir: &Path) -> Result<()> {
     let part_name = image_path
@@ -249,7 +247,9 @@ fn try_extract_7zz_cli(image_path: &Path, output_dir: &Path, part_name: &str) ->
     if sevenz_cmd == "7zz" {
         cmd.arg("-snld");
     }
-    let output = cmd.output().with_context(|| format!("Failed to execute {}", sevenz_cmd))?;
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to execute {}", sevenz_cmd))?;
     if !output.status.success() {
         bail!(
             "{} failed with exit code {:?}: {}",
@@ -305,10 +305,10 @@ fn try_extract_mtk(slice: &[u8], output_dir: &Path, part_name: &str) -> Result<(
         let base_name = String::from_utf8_lossy(&name_raw[..name_end])
             .trim()
             .replace('/', "_");
-        let hdr_sz = (u32::from_le_bytes(slice[pos + 52..pos + 56].try_into().unwrap()) as usize)
-            .max(68);
-        let align_sz = (u32::from_le_bytes(slice[pos + 64..pos + 68].try_into().unwrap()) as usize)
-            .max(16);
+        let hdr_sz =
+            (u32::from_le_bytes(slice[pos + 52..pos + 56].try_into().unwrap()) as usize).max(68);
+        let align_sz =
+            (u32::from_le_bytes(slice[pos + 64..pos + 68].try_into().unwrap()) as usize).max(16);
 
         let data_start = pos.saturating_add(hdr_sz);
         let data_end = data_start.saturating_add(dsize);
@@ -543,8 +543,8 @@ fn try_extract_ext4_slice(slice: &[u8], output_dir: &Path, part_name: &str) -> R
         ptr: slice.as_ptr(),
         len: slice.len(),
     };
-    let fs = Ext4::load(Box::new(reader))
-        .map_err(|e| anyhow::anyhow!("Ext4 load failed: {:?}", e))?;
+    let fs =
+        Ext4::load(Box::new(reader)).map_err(|e| anyhow::anyhow!("Ext4 load failed: {:?}", e))?;
     let pb = ByteProgress::new(part_name, img_size);
     let mut symlinks_extracted = 0u64;
     let mut regular_files: Vec<(ext4_view::PathBuf, PathBuf)> = Vec::new();
@@ -660,8 +660,7 @@ fn extract_ext4_file_buffered(
     let mode = file.metadata().mode() as u32;
     let expected_size = file.metadata().len() as usize;
     if expected_size == 0 {
-        File::create(target)
-            .with_context(|| format!("Failed to create {}", target.display()))?;
+        File::create(target).with_context(|| format!("Failed to create {}", target.display()))?;
         #[cfg(unix)]
         if mode != 0 {
             let _ = fs::set_permissions(target, std::fs::Permissions::from_mode(mode));
@@ -722,7 +721,6 @@ fn extract_ext4_file_buffered(
     })
 }
 
-
 fn collect_ext4_entries(
     fs: &Ext4,
     dir_path: &str,
@@ -781,7 +779,11 @@ fn collect_ext4_entries(
                 }
             }
             *symlinks_extracted += 1;
-            debug!(partition = part_name, symlink = path_str, "ext4.extract_symlink");
+            debug!(
+                partition = part_name,
+                symlink = path_str,
+                "ext4.extract_symlink"
+            );
         }
     }
 

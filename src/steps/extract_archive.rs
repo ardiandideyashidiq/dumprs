@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use flate2::bufread::DeflateDecoder;
 use flate2::read::GzDecoder;
 use indicatif::{HumanBytes, HumanDuration};
@@ -8,35 +8,38 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use tracing::{debug, info};
 
-use crate::formats::kdz::{unpack_dz, unpack_kdz};
 use crate::formats::fs_extract::extract_filesystem_slice;
+use crate::formats::kdz::{unpack_dz, unpack_kdz};
 use crate::formats::liblp::parse_lp_single_extents;
 use crate::formats::payload::ZIP_SLICE_MAGIC;
 use crate::formats::sevenzip::unpack_sevenzip;
 use crate::formats::sparse::{
-    extract_stream_or_sparse, extract_stream_or_sparse_pipelined, extract_stream_to_anon,
-    extract_stream_to_anon_pipelined, peek_sparse_first_offset, peek_sparse_prefix,
-    peek_sparse_virtual_size, SharedAnonSlice,
+    SharedAnonSlice, extract_stream_or_sparse, extract_stream_or_sparse_pipelined,
+    extract_stream_to_anon, extract_stream_to_anon_pipelined, peek_sparse_first_offset,
+    peek_sparse_prefix, peek_sparse_virtual_size,
 };
 use crate::utils::files::{
     can_use_anon_mmap, flatten_dir, get_recursive_files_list, is_early_extract_allowed,
     mark_early_extracted, register_in_memory_image,
 };
-use crate::utils::firmware::{
-    is_candidate_firmware_path, is_scatter_filename, ScatterInfo,
-};
+use crate::utils::firmware::{ScatterInfo, is_candidate_firmware_path, is_scatter_filename};
 use crate::utils::partitions::{
-    get_partition_name, get_partition_names_with_ab, get_partition_names_with_alias,
-    get_partition_type, PartitionType,
+    PartitionType, get_partition_name, get_partition_names_with_ab, get_partition_names_with_alias,
+    get_partition_type,
 };
 use crate::utils::progress::ByteProgress;
 
-fn unpack_tar_stream<R: Read>(reader: R, dest_dir: &Path, label: &'static str, total_hint: u64) -> Result<()> {
+fn unpack_tar_stream<R: Read>(
+    reader: R,
+    dest_dir: &Path,
+    label: &'static str,
+    total_hint: u64,
+) -> Result<()> {
     let start_time = Instant::now();
     let pb = ByteProgress::new(label, total_hint);
     let mut tar = tar::Archive::new(reader);
@@ -102,7 +105,6 @@ fn is_relevant_zip_entry(
     !scatter.is_superseded_variant(fname) && is_candidate_firmware_path(name)
 }
 
-
 struct TrackedLpPart {
     name: String,
     start: usize,
@@ -159,8 +161,8 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         let mut zip = zip::ZipArchive::new(Cursor::new(&mmap[..]))
             .with_context(|| format!("Failed to parse zip {}", archive_path.display()))?;
 
-        let abs_archive = fs::canonicalize(archive_path)
-            .unwrap_or_else(|_| archive_path.to_path_buf());
+        let abs_archive =
+            fs::canonicalize(archive_path).unwrap_or_else(|_| archive_path.to_path_buf());
         let known_parts: HashSet<String> = get_partition_names_with_alias().into_iter().collect();
         let known_parts_ab: HashSet<String> = get_partition_names_with_ab().into_iter().collect();
         let filter_unused = is_early_extract_allowed();
@@ -452,27 +454,34 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                                         pb.inc(size);
                                         return Ok(());
                                     }
-                                    let end_off =
-                                        if compression == zip::CompressionMethod::Deflated
-                                            && comp_end <= mmap.len()
-                                        {
-                                            let mut dec = DeflateDecoder::new(&mmap[start..comp_end]);
-                                            extract_stream_to_anon(
-                                                &mut dec, &[], *slice, true, buf, &pb,
-                                            )?
-                                        } else if compression == zip::CompressionMethod::Stored
-                                            && comp_end <= mmap.len()
-                                        {
-                                            let mut s = &mmap[start..comp_end];
-                                            extract_stream_to_anon(
-                                                &mut s, &[], *slice, true, buf, &pb,
-                                            )?
-                                        } else {
-                                            let mut zf = local_zip.by_index(i)?;
-                                            extract_stream_to_anon(
-                                                &mut zf, &[], *slice, true, buf, &pb,
-                                            )?
-                                        };
+                                    let end_off = if compression == zip::CompressionMethod::Deflated
+                                        && comp_end <= mmap.len()
+                                    {
+                                        let mut dec = DeflateDecoder::new(&mmap[start..comp_end]);
+                                        extract_stream_to_anon(
+                                            &mut dec,
+                                            &[],
+                                            *slice,
+                                            true,
+                                            buf,
+                                            &pb,
+                                        )?
+                                    } else if compression == zip::CompressionMethod::Stored
+                                        && comp_end <= mmap.len()
+                                    {
+                                        let mut s = &mmap[start..comp_end];
+                                        extract_stream_to_anon(&mut s, &[], *slice, true, buf, &pb)?
+                                    } else {
+                                        let mut zf = local_zip.by_index(i)?;
+                                        extract_stream_to_anon(
+                                            &mut zf,
+                                            &[],
+                                            *slice,
+                                            true,
+                                            buf,
+                                            &pb,
+                                        )?
+                                    };
                                     max_len.fetch_max(end_off, Ordering::Relaxed);
                                     if let Some(p_indices) = chunk_to_parts.get(&i) {
                                         for &p_idx in p_indices {
@@ -503,21 +512,21 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                                     }
                                 }
                                 SparseChunkTarget::Disk { file, max_len } => {
-                                    let (_, end_off) =
-                                        if compression == zip::CompressionMethod::Deflated
-                                            && comp_end <= mmap.len()
-                                        {
-                                            let mut dec = DeflateDecoder::new(&mmap[start..comp_end]);
-                                            extract_stream_or_sparse(&mut dec, file, true, buf, &pb)?
-                                        } else if compression == zip::CompressionMethod::Stored
-                                            && comp_end <= mmap.len()
-                                        {
-                                            let mut s = &mmap[start..comp_end];
-                                            extract_stream_or_sparse(&mut s, file, true, buf, &pb)?
-                                        } else {
-                                            let mut zf = local_zip.by_index(i)?;
-                                            extract_stream_or_sparse(&mut zf, file, true, buf, &pb)?
-                                        };
+                                    let (_, end_off) = if compression
+                                        == zip::CompressionMethod::Deflated
+                                        && comp_end <= mmap.len()
+                                    {
+                                        let mut dec = DeflateDecoder::new(&mmap[start..comp_end]);
+                                        extract_stream_or_sparse(&mut dec, file, true, buf, &pb)?
+                                    } else if compression == zip::CompressionMethod::Stored
+                                        && comp_end <= mmap.len()
+                                    {
+                                        let mut s = &mmap[start..comp_end];
+                                        extract_stream_or_sparse(&mut s, file, true, buf, &pb)?
+                                    } else {
+                                        let mut zf = local_zip.by_index(i)?;
+                                        extract_stream_or_sparse(&mut zf, file, true, buf, &pb)?
+                                    };
                                     max_len.fetch_max(end_off, Ordering::Relaxed);
                                 }
                             }
@@ -530,18 +539,16 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                         .and_then(|e| e.to_str())
                         .is_some_and(|e| e.eq_ignore_ascii_case("img"));
 
-                    let fname_str = name
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
+                    let fname_str = name.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     let stem = fname_str.split('.').next().unwrap_or(fname_str);
-                    let use_anon = is_img
-                        && (fname_str.starts_with("super") || known_parts_ab.contains(stem));
+                    let use_anon =
+                        is_img && (fname_str.starts_with("super") || known_parts_ab.contains(stem));
                     if use_anon
                         && size >= 4096
                         && compression == zip::CompressionMethod::Deflated
                         && comp_end <= mmap.len()
-                        && can_use_anon_mmap(size) {
+                        && can_use_anon_mmap(size)
+                    {
                         let comp_slice = &mmap[start..comp_end];
                         let mut dec = DeflateDecoder::new(comp_slice);
                         let mut head = [0u8; 64];
@@ -562,10 +569,7 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                         };
                         if let Ok(mut anon) = MmapOptions::new().len(alloc_len).map_anon() {
                             let slice = SharedAnonSlice::from_mmap_mut(&mut anon);
-                            let fname_str = name
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("");
+                            let fname_str = name.file_name().and_then(|n| n.to_str()).unwrap_or("");
                             let is_super = fname_str.starts_with("super");
                             let out_root = dest_dir.parent().map(|p| p.to_path_buf());
                             let early_ok =
@@ -679,8 +683,7 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                                         mode = "streaming",
                                         "partition.extract.begin"
                                     );
-                                    let pslice =
-                                        unsafe { slice.subslice(0, final_len as usize) };
+                                    let pslice = unsafe { slice.subslice(0, final_len as usize) };
                                     if extract_filesystem_slice(pslice, &part_out, canonical)
                                         .is_ok()
                                     {
@@ -717,9 +720,8 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                             pb.inc(size);
                         } else {
                             let mut slice = &mmap[start..comp_end];
-                            let (was_sparse, end_off) = extract_stream_or_sparse(
-                                &mut slice, &out_file, is_img, buf, &pb,
-                            )?;
+                            let (was_sparse, end_off) =
+                                extract_stream_or_sparse(&mut slice, &out_file, is_img, buf, &pb)?;
                             if was_sparse {
                                 out_file.set_len(end_off)?;
                             }
@@ -738,13 +740,8 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                         }
                     } else {
                         let mut zip_file = local_zip.by_index(i)?;
-                        let (was_sparse, end_off) = extract_stream_or_sparse(
-                            &mut zip_file,
-                            &out_file,
-                            is_img,
-                            buf,
-                            &pb,
-                        )?;
+                        let (was_sparse, end_off) =
+                            extract_stream_or_sparse(&mut zip_file, &out_file, is_img, buf, &pb)?;
                         if was_sparse {
                             out_file.set_len(end_off)?;
                         }
@@ -796,7 +793,12 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
             .with_context(|| format!("Failed to open {}", archive_path.display()))?;
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
         info!(archive = %archive_path.display(), size = %HumanBytes(len), "tar.extract.start");
-        return unpack_tar_stream(BufReader::with_capacity(1024 * 1024, file), dest_dir, "tar", len);
+        return unpack_tar_stream(
+            BufReader::with_capacity(1024 * 1024, file),
+            dest_dir,
+            "tar",
+            len,
+        );
     }
 
     if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
@@ -835,7 +837,11 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     }
 
     if let Err(e) = unpack_sevenzip(archive_path, dest_dir) {
-        bail!("Failed to extract archive {}: {}", archive_path.display(), e);
+        bail!(
+            "Failed to extract archive {}: {}",
+            archive_path.display(),
+            e
+        );
     }
 
     Ok(())

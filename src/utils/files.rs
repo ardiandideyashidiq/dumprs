@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -90,8 +90,8 @@ pub fn resolve_image_mmap_with_backing(path: &Path) -> Result<(Arc<Mmap>, usize,
     if mmap.len() >= 32 && &mmap[..16] == ZIP_SLICE_MAGIC {
         let start = u64::from_le_bytes(mmap[16..24].try_into().unwrap()) as usize;
         let len = u64::from_le_bytes(mmap[24..32].try_into().unwrap()) as usize;
-        let backing_str = std::str::from_utf8(&mmap[32..])
-            .context("Invalid UTF-8 in image slice reference")?;
+        let backing_str =
+            std::str::from_utf8(&mmap[32..]).context("Invalid UTF-8 in image slice reference")?;
         let backing_path = PathBuf::from(backing_str);
         if let Some(in_mem) = IN_MEM_IMAGES.lock().unwrap().get(&backing_path).cloned() {
             let end = start.saturating_add(len);
@@ -257,8 +257,13 @@ pub fn flatten_dir(dir: &Path) -> Result<()> {
             if target.exists() {
                 let _ = fs::remove_file(&target);
             }
-            fs::rename(&file, &target)
-                .with_context(|| format!("Failed to rename {} to {}", file.display(), target.display()))?;
+            fs::rename(&file, &target).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    file.display(),
+                    target.display()
+                )
+            })?;
         }
     }
 

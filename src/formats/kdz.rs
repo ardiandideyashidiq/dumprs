@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
 use indicatif::HumanBytes;
@@ -46,7 +46,9 @@ pub fn unpack_kdz(filename: &Path, work_dir: &Path) -> Result<()> {
 
         let name_bytes = &header_buf[0..256];
         let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(256);
-        let name = String::from_utf8_lossy(&name_bytes[..name_len]).trim().to_string();
+        let name = String::from_utf8_lossy(&name_bytes[..name_len])
+            .trim()
+            .to_string();
 
         let mut cursor = &header_buf[256..272];
         let length = cursor.read_u64::<LittleEndian>()?;
@@ -227,7 +229,9 @@ pub fn unpack_dz(filename: &Path, work_dir: &Path) -> Result<()> {
 
         let slice_name_raw = &chunk_buf[4..36];
         let name_len = slice_name_raw.iter().position(|&b| b == 0).unwrap_or(32);
-        let slice_name = String::from_utf8_lossy(&slice_name_raw[..name_len]).trim().to_string();
+        let slice_name = String::from_utf8_lossy(&slice_name_raw[..name_len])
+            .trim()
+            .to_string();
 
         let mut cursor = &chunk_buf[100..128];
         let _target_size = cursor.read_u32::<LittleEndian>()?;

@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use dumprs::formats::liblp::lpunpack;
 use dumprs::formats::sdat2img::sdat2img;
 use dumprs::formats::sparse::unsparse_file;

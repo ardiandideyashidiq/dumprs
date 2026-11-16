@@ -39,25 +39,27 @@ pub fn prepare_sparsed_images(files_path: &Path) -> Result<()> {
         .filter(|p| chunks_by_partition.contains_key(p))
         .collect();
 
-    partitions.into_par_iter().try_for_each(|partition| -> Result<()> {
-        let output_image = files_path.join(format!("{}.img", partition));
-        if output_image.is_file() {
-            return Ok(());
-        }
+    partitions
+        .into_par_iter()
+        .try_for_each(|partition| -> Result<()> {
+            let output_image = files_path.join(format!("{}.img", partition));
+            if output_image.is_file() {
+                return Ok(());
+            }
 
-        if let Some(mut sparsechunk_files) = chunks_by_partition.get(&partition).cloned() {
-            sparsechunk_files.sort_by_key(|(k, _)| *k);
-            let chunk_paths: Vec<_> = sparsechunk_files.into_iter().map(|(_, p)| p).collect();
+            if let Some(mut sparsechunk_files) = chunks_by_partition.get(&partition).cloned() {
+                sparsechunk_files.sort_by_key(|(k, _)| *k);
+                let chunk_paths: Vec<_> = sparsechunk_files.into_iter().map(|(_, p)| p).collect();
 
-            info!(
-                partition = %partition,
-                chunks = chunk_paths.len(),
-                "sparsechunks.prepare"
-            );
-            unsparse_chunks(&chunk_paths, &output_image)?;
-        }
-        Ok(())
-    })?;
+                info!(
+                    partition = %partition,
+                    chunks = chunk_paths.len(),
+                    "sparsechunks.prepare"
+                );
+                unsparse_chunks(&chunk_paths, &output_image)?;
+            }
+            Ok(())
+        })?;
 
     Ok(())
 }

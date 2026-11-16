@@ -105,7 +105,10 @@ pub fn get_partition_names() -> Vec<&'static str> {
 }
 
 pub fn get_partition_names_with_alias() -> Vec<String> {
-    let mut names: Vec<String> = get_partition_names().into_iter().map(String::from).collect();
+    let mut names: Vec<String> = get_partition_names()
+        .into_iter()
+        .map(String::from)
+        .collect();
     for (alt, _) in ALTERNATIVE_PARTITION_NAMES {
         names.push((*alt).to_string());
     }
@@ -132,14 +135,27 @@ pub fn fix_aliases(images_path: &Path) -> Result<()> {
         }
 
         if partition_path.exists() {
-            info!(alias = alt_name, canonical = name, "partition.alias.ignored");
+            info!(
+                alias = alt_name,
+                canonical = name,
+                "partition.alias.ignored"
+            );
             let _ = fs::remove_file(&alt_path);
             continue;
         }
 
-        info!(alias = alt_name, canonical = name, "partition.alias.renamed");
-        fs::rename(&alt_path, &partition_path)
-            .with_context(|| format!("Failed to rename alias {} to {}", alt_path.display(), partition_path.display()))?;
+        info!(
+            alias = alt_name,
+            canonical = name,
+            "partition.alias.renamed"
+        );
+        fs::rename(&alt_path, &partition_path).with_context(|| {
+            format!(
+                "Failed to rename alias {} to {}",
+                alt_path.display(),
+                partition_path.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -199,16 +215,26 @@ pub fn correct_ab_filenames(images_path: &Path) -> Result<()> {
 
         if a_path.is_file() {
             info!(from = %a_path.display(), to = %non_ab_path.display(), "partition.slot.normalized");
-            fs::rename(&a_path, &non_ab_path)
-                .with_context(|| format!("Failed to rename {} to {}", a_path.display(), non_ab_path.display()))?;
+            fs::rename(&a_path, &non_ab_path).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    a_path.display(),
+                    non_ab_path.display()
+                )
+            })?;
             moved_files.insert(unslotted.to_string(), ());
             if b_path.is_file() {
                 let _ = fs::remove_file(&b_path);
             }
         } else if b_path.is_file() {
             info!(from = %b_path.display(), to = %non_ab_path.display(), "partition.slot.normalized");
-            fs::rename(&b_path, &non_ab_path)
-                .with_context(|| format!("Failed to rename {} to {}", b_path.display(), non_ab_path.display()))?;
+            fs::rename(&b_path, &non_ab_path).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    b_path.display(),
+                    non_ab_path.display()
+                )
+            })?;
             moved_files.insert(unslotted.to_string(), ());
         }
     }
