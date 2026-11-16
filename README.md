@@ -1,6 +1,6 @@
 # dumprs
 
-High-performance, pure-Rust extractor for Android firmware and OTA images.
+High-performance, pure-Rust extractor for Android firmware and OTA images, based on [dumpyara](https://github.com/sebaubuntu-python/dumpyara).
 
 > [!WARNING]
 > **Work in Progress (WIP) & Experimental**: This project is under active development and has not yet been thoroughly tested across a wide variety of OEM firmware files and partition formats. Bugs, missing edge-case handling, or extraction errors may occur. Bug reports and sample payloads are welcome!
@@ -65,6 +65,10 @@ dumprs ota.zip --debug
 | `-d, --debug` | Retain temporary directories for debugging |
 | `-h, --help` | Print help information |
 | `-V, --version` | Print version |
+
+## Credits
+
+- **[dumpyara](https://github.com/sebaubuntu-python/dumpyara)** by [@sebaubuntu-python](https://github.com/sebaubuntu-python) - The original Python-based firmware extractor architecture that inspired and shaped `dumprs`.
 
 ## License
 
