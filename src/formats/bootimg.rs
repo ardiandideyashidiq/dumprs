@@ -2,10 +2,13 @@ use anyhow::{bail, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::GzDecoder;
 use std::borrow::Cow;
-use std::fs;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 use tracing::info;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use crate::utils::files::resolve_image_mmap;
 const BOOT_MAGIC: &[u8; 8] = b"ANDROID!";
@@ -170,7 +173,11 @@ fn extract_standard_bootimg(mmap: &[u8], output_path: &Path) -> Result<()> {
         let start = second_offset as usize;
         let end = start + second_size as usize;
         if end <= mmap.len() {
-            fs::write(output_path.join("second.img"), &mmap[start..end])?;
+            let buf = &mmap[start..end];
+            fs::write(output_path.join("second.img"), buf)?;
+            if buf.starts_with(b"QCDT") {
+                fs::write(output_path.join("dt.img"), buf)?;
+            }
         }
     }
 
@@ -268,6 +275,32 @@ fn extract_ramdisk(data: &[u8], out_dir: &Path) {
         } else {
             return;
         }
+    } else if data.starts_with(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) {
+        // XZ
+        let mut xz = xz2::read::XzDecoder::new(data);
+        let mut out = Vec::with_capacity(data.len() * 2);
+        if xz.read_to_end(&mut out).is_ok() {
+            Cow::Owned(out)
+        } else {
+            return;
+        }
+    } else if data.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        // Zstandard
+        let mut out = Vec::with_capacity(data.len() * 2);
+        if zstd::stream::copy_decode(data, &mut out).is_ok() {
+            Cow::Owned(out)
+        } else {
+            return;
+        }
+    } else if data.starts_with(b"BZh") {
+        // Bzip2
+        let mut bz = bzip2::read::BzDecoder::new(data);
+        let mut out = Vec::with_capacity(data.len() * 2);
+        if bz.read_to_end(&mut out).is_ok() {
+            Cow::Owned(out)
+        } else {
+            return;
+        }
     } else {
         Cow::Borrowed(data)
     };
@@ -290,8 +323,9 @@ fn unpack_cpio(data: &[u8], out_dir: &Path) -> Result<()> {
             break;
         }
 
-        let namesize = u32::from_str_radix(std::str::from_utf8(&header[94..102])?, 16)? as usize;
+        let mode = u32::from_str_radix(std::str::from_utf8(&header[14..22])?, 16)?;
         let filesize = u32::from_str_radix(std::str::from_utf8(&header[54..62])?, 16)? as usize;
+        let namesize = u32::from_str_radix(std::str::from_utf8(&header[94..102])?, 16)? as usize;
 
         if pos + namesize > data.len() {
             break;
@@ -320,8 +354,32 @@ fn unpack_cpio(data: &[u8], out_dir: &Path) -> Result<()> {
             let _ = fs::create_dir_all(parent);
         }
 
-        if !name.is_empty() && filesize > 0 {
-            let _ = fs::write(&target_path, file_buf);
+        let file_type = mode & 0o170000;
+        if file_type == 0o120000 {
+            // Symlink
+            let link_target = std::str::from_utf8(file_buf).unwrap_or("").trim_end_matches('\0');
+            if !link_target.is_empty() {
+                #[cfg(unix)]
+                {
+                    let _ = std::os::unix::fs::symlink(link_target, &target_path);
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = fs::write(&target_path, link_target);
+                }
+            }
+        } else if file_type == 0o040000 {
+            let _ = fs::create_dir_all(&target_path);
+        } else if !name.is_empty() {
+            if filesize > 0 {
+                let _ = fs::write(&target_path, file_buf);
+            } else {
+                let _ = File::create(&target_path);
+            }
+            #[cfg(unix)]
+            if (mode & 0o7777) != 0 {
+                let _ = fs::set_permissions(&target_path, std::fs::Permissions::from_mode(mode & 0o7777));
+            }
         }
     }
 
