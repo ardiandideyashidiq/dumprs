@@ -1,4 +1,5 @@
 use dumprs::formats::bootimg::extract_bootimg;
+use dumprs::formats::kdz::parse_gpt_entries;
 use dumprs::formats::liblp::lpunpack;
 use dumprs::formats::payload::PayloadHeader;
 use dumprs::formats::sdat2img::{sdat2img, sdat2img_from_reader};
@@ -386,6 +387,131 @@ fn test_liblp_super_unpacking() {
     lpunpack(&sparse_super_path, &sparse_out_dir).unwrap();
     let sparse_vendor = fs::read(sparse_out_dir.join("vendor.img")).unwrap();
     assert_eq!(sparse_vendor, vendor_data);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_kdz_gpt_parsing() {
+    let mut data = vec![0u8; 8192];
+    // Put EFI PART at offset 512
+    let gpt_off = 512;
+    data[gpt_off..gpt_off + 8].copy_from_slice(b"EFI PART");
+    // entry_lba = 2 (byte 1024)
+    data[gpt_off + 72..gpt_off + 80].copy_from_slice(&2u64.to_le_bytes());
+    // num_entries = 2
+    data[gpt_off + 80..gpt_off + 84].copy_from_slice(&2u32.to_le_bytes());
+    // entry_size = 128
+    data[gpt_off + 84..gpt_off + 88].copy_from_slice(&128u32.to_le_bytes());
+
+    // Entry 0 at byte 1024:
+    let e0 = 1024;
+    data[e0..e0 + 16].copy_from_slice(&[0x11u8; 16]); // non-zero type guid
+    data[e0 + 32..e0 + 40].copy_from_slice(&100u64.to_le_bytes()); // start_lba = 100
+    data[e0 + 40..e0 + 48].copy_from_slice(&200u64.to_le_bytes()); // end_lba = 200
+    // Name: "system" in UTF-16LE
+    let sys_u16 = [b's' as u16, b'y' as u16, b's' as u16, b't' as u16, b'e' as u16, b'm' as u16];
+    for (i, &c) in sys_u16.iter().enumerate() {
+        data[e0 + 56 + i * 2..e0 + 56 + i * 2 + 2].copy_from_slice(&c.to_le_bytes());
+    }
+
+    let partitions = parse_gpt_entries(&data);
+    assert_eq!(partitions.len(), 1);
+    assert_eq!(partitions[0].name, "system");
+    assert_eq!(partitions[0].start_lba, 100);
+    assert_eq!(partitions[0].end_lba, 200);
+}
+
+#[test]
+fn test_bootimg_ramdisk_cpio_symlink() {
+    let temp_dir = std::env::temp_dir().join("dumprs_test_boot_symlink");
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let boot_img_path = temp_dir.join("boot.img");
+    let out_dir = temp_dir.join("boot_out");
+
+    let page_size = 2048u32;
+    let kernel_size = 8u32;
+
+    // Create a mock CPIO payload with 1 symlink: "bin/sh" -> "toybox"
+    // CPIO newc header: 110 bytes
+    // magic: 070701
+    // mode at 14..22: 0120777 (octal 0120777 = hex a1ff)
+    // filesize at 54..62: 6 (bytes for "toybox")
+    // namesize at 94..102: 7 (bytes for "bin/sh\0")
+    let mut cpio = Vec::new();
+    let mut hdr = format!(
+        "070701{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
+        1, // ino
+        0o120777, // mode (symlink)
+        0, 0, 1, 0,
+        6, // filesize
+        0, 0, 0, 0,
+        7, // namesize
+        0  // check
+    ).into_bytes();
+    hdr.resize(110, b'0');
+    cpio.extend_from_slice(&hdr);
+    cpio.extend_from_slice(b"bin/sh\0");
+    // pad to 4 bytes: (110 + 7) = 117 -> pad 3 bytes
+    cpio.extend_from_slice(&[0, 0, 0]);
+    cpio.extend_from_slice(b"toybox");
+    // pad filesize 6 to 4 bytes: 2 bytes pad
+    cpio.extend_from_slice(&[0, 0]);
+
+    // TRAILER!!!
+    let mut trailer_hdr = format!(
+        "070701{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
+        2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 11, 0
+    ).into_bytes();
+    trailer_hdr.resize(110, b'0');
+    cpio.extend_from_slice(&trailer_hdr);
+    cpio.extend_from_slice(b"TRAILER!!!\0");
+    // (110 + 11) = 121 -> pad 3 bytes
+    cpio.extend_from_slice(&[0, 0, 0]);
+
+    let ramdisk_size = cpio.len() as u32;
+
+    let mut header = Vec::new();
+    header.extend_from_slice(b"ANDROID!");
+    header.extend_from_slice(&kernel_size.to_le_bytes());
+    header.extend_from_slice(&0x10008000u32.to_le_bytes());
+    header.extend_from_slice(&ramdisk_size.to_le_bytes());
+    header.extend_from_slice(&0x11000000u32.to_le_bytes());
+    header.extend_from_slice(&0u32.to_le_bytes());
+    header.extend_from_slice(&0u32.to_le_bytes());
+    header.extend_from_slice(&0x10000100u32.to_le_bytes());
+    header.extend_from_slice(&page_size.to_le_bytes());
+    header.extend_from_slice(&0u32.to_le_bytes());
+    header.extend_from_slice(&0u32.to_le_bytes());
+    header.extend_from_slice(&[0u8; 16]);
+    header.extend_from_slice(&[0u8; 512]);
+    header.extend_from_slice(&[0u8; 32]);
+    header.extend_from_slice(&[0u8; 1024]);
+    header.resize(page_size as usize, 0);
+
+    let mut kernel_data = b"KERNELOK".to_vec();
+    kernel_data.resize(page_size as usize, 0);
+
+    cpio.resize(((ramdisk_size as usize + page_size as usize - 1) / page_size as usize) * page_size as usize, 0);
+
+    let mut img_data = Vec::new();
+    img_data.extend_from_slice(&header);
+    img_data.extend_from_slice(&kernel_data);
+    img_data.extend_from_slice(&cpio);
+
+    fs::write(&boot_img_path, img_data).unwrap();
+
+    extract_bootimg(&boot_img_path, &out_dir).unwrap();
+
+    let symlink_path = out_dir.join("ramdisk/bin/sh");
+    assert!(symlink_path.exists() || symlink_path.is_symlink());
+    #[cfg(unix)]
+    {
+        let target = fs::read_link(&symlink_path).unwrap();
+        assert_eq!(target.to_str().unwrap(), "toybox");
+    }
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
