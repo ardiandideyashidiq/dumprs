@@ -15,6 +15,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use crate::utils::files::resolve_image_mmap;
 use crate::utils::progress::ByteProgress;
 
@@ -177,6 +180,8 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
         .map_err(|e| anyhow::anyhow!("EroFS init failed: {:?}", e))?;
     let pb = ByteProgress::new(part_name, img_size);
     let mut files_to_extract = Vec::new();
+    let mut symlinks_extracted = 0u64;
+
     for entry in fs
         .walk_dir("/")
         .map_err(|e| anyhow::anyhow!("EroFS walk_dir failed: {:?}", e))?
@@ -195,12 +200,30 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
             if fs::create_dir(&target).is_err() {
                 fs::create_dir_all(&target)?;
             }
+            #[cfg(unix)]
+            {
+                let _ = fs::set_permissions(&target, entry.inode.permissions());
+            }
             debug!(partition = part_name, dir = rel_path, "erofs.mkdir");
         } else if entry.inode.is_file() {
             files_to_extract.push((entry.inode, target));
+        } else if entry.inode.is_symlink() {
+            if let Ok(link_target) = fs.read_link_inode(entry.inode) {
+                let link_str = link_target.to_string_lossy();
+                #[cfg(unix)]
+                {
+                    let _ = std::os::unix::fs::symlink(&*link_str, &target);
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = fs::write(&target, link_str.as_bytes());
+                }
+                symlinks_extracted += 1;
+                debug!(partition = part_name, symlink = %target.display(), "erofs.extract_symlink");
+            }
         }
     }
-    let files_extracted = files_to_extract.len() as u64;
+    let files_extracted = symlinks_extracted + files_to_extract.len() as u64;
     let bytes_extracted = AtomicU64::new(0);
 
     files_to_extract
@@ -211,6 +234,10 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
             if expected_size == 0 {
                 File::create(&target)
                     .with_context(|| format!("Failed to create {}", target.display()))?;
+                #[cfg(unix)]
+                {
+                    let _ = fs::set_permissions(&target, inode.permissions());
+                }
                 return Ok(());
             }
 
@@ -253,6 +280,10 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
                     writer.flush()?;
                     bytes_extracted.fetch_add(file_bytes, Ordering::Relaxed);
                     pb.inc(file_bytes);
+                }
+                #[cfg(unix)]
+                {
+                    let _ = fs::set_permissions(&target, inode.permissions());
                 }
                 Ok(())
             })?;
@@ -447,10 +478,15 @@ fn extract_ext4_file_buffered(
     let mut file = fs_ref
         .open(entry_path)
         .map_err(|e| anyhow::anyhow!("Ext4 open failed on {}: {:?}", entry_path.display(), e))?;
+    let mode = file.metadata().mode() as u32;
     let expected_size = file.metadata().len() as usize;
     if expected_size == 0 {
         File::create(target)
             .with_context(|| format!("Failed to create {}", target.display()))?;
+        #[cfg(unix)]
+        if mode != 0 {
+            let _ = fs::set_permissions(target, std::fs::Permissions::from_mode(mode));
+        }
         return Ok(0);
     }
     FS_COPY_BUF.with(|cell| -> Result<u64> {
@@ -470,6 +506,10 @@ fn extract_ext4_file_buffered(
             }
             fs::write(target, &copy_buf[..filled])
                 .with_context(|| format!("Failed to write {}", target.display()))?;
+            #[cfg(unix)]
+            if mode != 0 {
+                let _ = fs::set_permissions(target, std::fs::Permissions::from_mode(mode));
+            }
             Ok(filled as u64)
         } else {
             let out_file = File::create(target)
@@ -494,6 +534,10 @@ fn extract_ext4_file_buffered(
                 }
             }
             writer.flush()?;
+            #[cfg(unix)]
+            if mode != 0 {
+                let _ = fs::set_permissions(target, std::fs::Permissions::from_mode(mode));
+            }
             Ok(file_bytes)
         }
     })
