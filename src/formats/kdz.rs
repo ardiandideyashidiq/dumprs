@@ -4,7 +4,7 @@ use flate2::read::ZlibDecoder;
 use indicatif::HumanBytes;
 use memmap2::Mmap;
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use tracing::{debug, info};
@@ -107,6 +107,93 @@ struct DzChunk {
     target_addr: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct GptPartition {
+    pub name: String,
+    pub start_lba: u64,
+    pub end_lba: u64,
+}
+
+pub fn parse_gpt_entries(data: &[u8]) -> Vec<GptPartition> {
+    let mut partitions = Vec::new();
+    let gpt_offsets = [512usize, 4096usize];
+    let mut header_offset = None;
+    for &off in &gpt_offsets {
+        if off + 92 <= data.len() && &data[off..off + 8] == b"EFI PART" {
+            header_offset = Some(off);
+            break;
+        }
+    }
+
+    let Some(off) = header_offset else {
+        return partitions;
+    };
+
+    let block_shift = if off == 4096 { 12 } else { 9 };
+    let block_size = 1usize << block_shift;
+
+    let mut cursor = &data[off + 72..off + 92];
+    let entry_lba = match cursor.read_u64::<LittleEndian>() {
+        Ok(v) => v,
+        Err(_) => return partitions,
+    };
+    let num_entries = match cursor.read_u32::<LittleEndian>() {
+        Ok(v) => v as usize,
+        Err(_) => return partitions,
+    };
+    let entry_size = match cursor.read_u32::<LittleEndian>() {
+        Ok(v) => v as usize,
+        Err(_) => return partitions,
+    };
+
+    let entries_offset = (entry_lba as usize) * block_size;
+    if entries_offset >= data.len() || entry_size < 128 {
+        return partitions;
+    }
+
+    let mut cur_pos = entries_offset;
+    for _ in 0..num_entries.min(256) {
+        if cur_pos + entry_size > data.len() {
+            break;
+        }
+        let entry_buf = &data[cur_pos..cur_pos + entry_size];
+        cur_pos += entry_size;
+
+        let type_guid = &entry_buf[0..16];
+        if type_guid.iter().all(|&b| b == 0) {
+            continue;
+        }
+
+        let mut entry_cursor = &entry_buf[32..56];
+        let start_lba = match entry_cursor.read_u64::<LittleEndian>() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let end_lba = match entry_cursor.read_u64::<LittleEndian>() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let name_bytes = &entry_buf[56..128];
+        let name_u16: Vec<u16> = name_bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&c| c != 0)
+            .collect();
+
+        let name = String::from_utf16_lossy(&name_u16).trim().to_string();
+        if !name.is_empty() {
+            partitions.push(GptPartition {
+                name,
+                start_lba,
+                end_lba,
+            });
+        }
+    }
+
+    partitions
+}
+
 pub fn unpack_dz(filename: &Path, work_dir: &Path) -> Result<()> {
     let file = File::open(filename)
         .with_context(|| format!("Failed to open DZ file {}", filename.display()))?;
@@ -164,7 +251,9 @@ pub fn unpack_dz(filename: &Path, work_dir: &Path) -> Result<()> {
     );
     let pb = ByteProgress::new("dz", total_input_bytes);
     let mut open_files: HashMap<String, File> = HashMap::new();
+    let mut slice_extents: HashMap<String, (u64, u64)> = HashMap::new();
     let mut decompressed = Vec::with_capacity(256 * 1024);
+    let mut gpt_partitions: Vec<GptPartition> = Vec::new();
 
     for chunk in chunks {
         let data_len = chunk.data_size as usize;
@@ -186,6 +275,25 @@ pub fn unpack_dz(filename: &Path, work_dir: &Path) -> Result<()> {
         } else {
             compressed_data
         };
+
+        if gpt_partitions.is_empty() && (payload.len() >= 1024) {
+            let found = parse_gpt_entries(payload);
+            if !found.is_empty() {
+                info!(count = found.len(), "dz.gpt.parsed");
+                gpt_partitions = found;
+            }
+        }
+
+        let chunk_start_lba = chunk.target_addr as u64;
+        let chunk_blocks = (payload.len() as u64 + 511) / 512;
+        let chunk_end_lba = chunk_start_lba.saturating_add(chunk_blocks);
+        slice_extents
+            .entry(chunk.slice_name.clone())
+            .and_modify(|(min_lba, max_lba)| {
+                *min_lba = (*min_lba).min(chunk_start_lba);
+                *max_lba = (*max_lba).max(chunk_end_lba);
+            })
+            .or_insert((chunk_start_lba, chunk_end_lba));
 
         let out_file = if let Some(f) = open_files.get_mut(&chunk.slice_name) {
             f
@@ -210,6 +318,36 @@ pub fn unpack_dz(filename: &Path, work_dir: &Path) -> Result<()> {
     pb.finish();
     for (_, mut f) in open_files {
         let _ = f.flush();
+    }
+
+    // Write .params metadata files for each slice
+    for (slice_name, (start_lba, end_lba)) in slice_extents {
+        let params_path = work_dir.join(format!("{}.params", slice_name));
+        let params_content = format!(
+            "# saved parameters for the file \"{}\"\nstartLBA={}\nstartAddr={}\nendLBA={}\nendAddr={}\ndev=0\nblockSize=512\nblockShift=9\n",
+            slice_name,
+            start_lba,
+            start_lba * 512,
+            end_lba,
+            end_lba * 512
+        );
+        let _ = fs::write(params_path, params_content);
+    }
+
+    // Write .params for any additional GPT-declared partitions
+    for part in gpt_partitions {
+        let params_path = work_dir.join(format!("{}.params", part.name));
+        if !params_path.exists() {
+            let params_content = format!(
+                "# saved parameters for the file \"{}\"\nstartLBA={}\nstartAddr={}\nendLBA={}\nendAddr={}\ndev=0\nblockSize=512\nblockShift=9\n",
+                part.name,
+                part.start_lba,
+                part.start_lba * 512,
+                part.end_lba,
+                (part.end_lba + 1) * 512
+            );
+            let _ = fs::write(params_path, params_content);
+        }
     }
 
     Ok(())
