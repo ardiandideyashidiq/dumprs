@@ -10,6 +10,7 @@ use walkdir::WalkDir;
 use crate::steps::extract_archive::extract_archive;
 use crate::steps::extract_images::extract_images_with_cleanup;
 use crate::steps::prepare_images::prepare_images;
+use crate::utils::device_info::DeviceInfo;
 use crate::utils::files::{
     clear_in_memory_images, rmtree_recursive, set_allow_early_extract, sort_files,
 };
@@ -138,6 +139,14 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
 
     let finalize_start = Instant::now();
     let cleanup_temp = !options.debug && !options.resume;
+
+    // Generate device info and README.md
+    let device_info = DeviceInfo::from_dump_dir(output_path);
+    let readme_content = device_info.generate_readme();
+    if let Err(e) = fs::write(output_path.join("README.md"), &readme_content) {
+        tracing::warn!("Failed to write README.md: {e}");
+    }
+
     let mut files_list = Vec::new();
     let mut total_bytes = 0u64;
     let mut root_files = 0usize;
@@ -216,6 +225,8 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
         duration = %HumanDuration(finalize_start.elapsed()),
         "step.finalize.done"
     );
+
+    device_info.render_terminal();
 
     log_summary(
         output_path,

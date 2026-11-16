@@ -515,3 +515,105 @@ fn test_bootimg_ramdisk_cpio_symlink() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_device_info_and_readme_generation() {
+    use dumprs::utils::device_info::DeviceInfo;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let temp_dir = std::env::temp_dir().join("dumprs_test_device_info");
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(temp_dir.join("system/system")).unwrap();
+    fs::create_dir_all(temp_dir.join("vendor")).unwrap();
+    fs::create_dir_all(temp_dir.join("product")).unwrap();
+    fs::create_dir_all(temp_dir.join("boot")).unwrap();
+
+    let system_prop = r#"
+ro.build.description=sys_tssi_64_infinix-user 11 RP1A.200720.011 759119 release-keys
+ro.build.display.id=X6812B-H6912KL-R-OP-241128V1218
+ro.tranos.version=xos7.6.0
+ro.product.brand=Infinix
+ro.product.model=Infinix-X6812B
+ro.build.id=RP1A.200720.011
+ro.build.version.release=11
+ro.build.version.security_patch=2023-10-05
+ro.product.cpu.abilist=arm64-v8a,armeabi-v7a,armeabi
+ro.build.ab_update=true
+ro.treble.enabled=true
+ro.sf.lcd_density=480
+"#;
+    fs::write(temp_dir.join("system/system/build.prop"), system_prop).unwrap();
+    fs::write(temp_dir.join("vendor/build.prop"), "ro.board.platform=mt6768\n").unwrap();
+    fs::write(
+        temp_dir.join("product/build.prop"),
+        "ro.product.build.fingerprint=Infinix/X6812B-OP/Infinix-X6812B:11/RP1A.200720.011/241128V1218:user/release-keys\n",
+    )
+    .unwrap();
+
+    // Create a mock gzipped kernel
+    let kernel_raw = b"PADDING_DATA_BEFORE_BANNER Linux version 4.14.186-g911263112f80-dirty (nobody@android-build) (gcc version 10.2.1) #1 SMP PREEMPT Thu Nov 28 12:18:00 CST 2024 PADDING_AFTER";
+    let mut gz = GzEncoder::new(Vec::new(), Compression::fast());
+    gz.write_all(kernel_raw).unwrap();
+    let kernel_gz = gz.finish().unwrap();
+    fs::write(temp_dir.join("boot/kernel"), kernel_gz).unwrap();
+
+    let info = DeviceInfo::from_dump_dir(&temp_dir);
+
+    assert_eq!(
+        info.description.as_deref(),
+        Some("sys_tssi_64_infinix-user 11 RP1A.200720.011 759119 release-keys")
+    );
+    assert_eq!(info.brand.as_deref(), Some("Infinix"));
+    assert_eq!(info.model.as_deref(), Some("Infinix-X6812B"));
+    assert_eq!(info.platform.as_deref(), Some("MT6768"));
+    assert_eq!(info.android_build.as_deref(), Some("RP1A.200720.011"));
+    assert_eq!(info.android_version.as_deref(), Some("11"));
+    assert_eq!(
+        info.tran_os_build.as_deref(),
+        Some("X6812B-H6912KL-R-OP-241128V1218")
+    );
+    assert_eq!(info.tran_os_version.as_deref(), Some("xos7.6.0"));
+    assert_eq!(
+        info.kernel_version.as_deref(),
+        Some("4.14.186-g911263112f80-dirty")
+    );
+    assert_eq!(info.security_patch.as_deref(), Some("2023-10-05"));
+    assert_eq!(
+        info.cpu_abilist.as_deref(),
+        Some("arm64-v8a,armeabi-v7a,armeabi")
+    );
+    assert_eq!(info.is_ab, Some(true));
+    assert_eq!(info.treble_support, Some(true));
+    assert_eq!(info.screen_density.as_deref(), Some("480"));
+    assert_eq!(
+        info.fingerprint.as_deref(),
+        Some("Infinix/X6812B-OP/Infinix-X6812B:11/RP1A.200720.011/241128V1218:user/release-keys")
+    );
+
+    let readme = info.generate_readme();
+    assert!(readme.contains("## FIRMWARE DUMP"));
+    assert!(readme.contains("### sys_tssi_64_infinix-user 11 RP1A.200720.011 759119 release-keys"));
+    assert!(readme.contains("- Brand: Infinix"));
+    assert!(readme.contains("- Model: Infinix-X6812B"));
+    assert!(readme.contains("- Platform: MT6768"));
+    assert!(readme.contains("- CPU abilist: arm64-v8a,armeabi-v7a,armeabi"));
+    assert!(readme.contains("- A/B device: true"));
+    assert!(readme.contains("- Treble device: true"));
+    assert!(readme.contains("- Screen density: 480"));
+    assert!(readme.contains("- Android version: 11"));
+    assert!(readme.contains("- Android build: RP1A.200720.011"));
+    assert!(readme.contains("- TranOS build: X6812B-H6912KL-R-OP-241128V1218"));
+    assert!(readme.contains("- TranOS version: xos7.6.0"));
+    assert!(readme.contains("- Security patch: 2023-10-05"));
+    assert!(readme.contains("- Kernel version: 4.14.186-g911263112f80-dirty"));
+    assert!(readme.contains(
+        "- Fingerprint: Infinix/X6812B-OP/Infinix-X6812B:11/RP1A.200720.011/241128V1218:user/release-keys"
+    ));
+
+    // Test terminal rendering does not panic
+    info.render_terminal();
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
