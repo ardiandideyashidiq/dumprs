@@ -68,7 +68,19 @@ dumprs ota.zip --debug
 
 ## Credits
 
-- **[dumpyara](https://github.com/sebaubuntu-python/dumpyara)** by [@sebaubuntu-python](https://github.com/sebaubuntu-python) - The original Python-based firmware extractor architecture that inspired and shaped `dumprs`.
+- **[DumprX](https://github.com/ramabondanp/DumprX)** by [@ramabondanp](https://github.com/ramabondanp) (Rama Bondan Prakoso) & [@rokibhasansagar](https://github.com/rokibhasansagar) (Rokib Hasan Sagar) - Heuristics for device info distillation, scoped property precedence, Transsion / Xiaomi / Motorola / OPlus hardware and OS extraction, and Markdown dump card formatting.
+- **[dumpyara](https://github.com/sebaubuntu-python/dumpyara)** by [@sebaubuntu-python](https://github.com/sebaubuntu-python) ([@SebaUbuntu](https://github.com/SebaUbuntu)) - The original Python-based firmware extractor architecture, multi-format pipeline design, and AOSP device tree conventions that inspired and shaped `dumprs`.
+- **[Phoenix Firmware Dumper](https://github.com/DroidDumps)** by [DroidDumps](https://github.com/DroidDumps) - Foundational firmware dumping methodologies and community contributions.
+- **Format & Tool Authors**:
+  - `sdat2img` by [@xpirt](https://github.com/xpirt), [@luxi78](https://github.com/luxi78), [@howellzhu](https://github.com/howellzhu)
+  - `simg2img` by [@anestisb](https://github.com/anestisb)
+  - `extract_android_ota_payload` by [@cyxx](https://github.com/cyxx) and the Android Open Source Project (`update_engine`)
+  - `liblp` & `lpunpack` by Google AOSP & [@LonelyFool](https://github.com/LonelyFool)
+  - `kdztools` (`unkdz` / `undz`) by IOMonster ([@thecubed](https://github.com/thecubed)), [@ehem](https://github.com/ehem), and [@steadfasterX](https://github.com/steadfasterX)
+  - `aospdtgen` / `twrpdtgen` by [@SebaUbuntu](https://github.com/SebaUbuntu)
+  - `backhand` by [@wcampbell0x2a](https://github.com/wcampbell0x2a)
+  - `erofs-rs` by EROFS developers
+  - `termimad` by [@Canop](https://github.com/Canop)
 
 ## License
 
