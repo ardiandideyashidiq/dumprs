@@ -158,7 +158,23 @@ pub fn get_recursive_files_list(dir: &Path, relative: bool) -> Vec<PathBuf> {
 }
 
 pub fn sort_files(files: &mut [PathBuf]) {
-    files.par_sort_unstable_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+    files.par_sort_unstable_by(|a, b| {
+        let mut a_comps = a.components();
+        let mut b_comps = b.components();
+        loop {
+            match (a_comps.next(), b_comps.next()) {
+                (Some(ca), Some(cb)) => {
+                    let ord = ca.as_os_str().cmp(cb.as_os_str());
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                }
+                (None, None) => return std::cmp::Ordering::Equal,
+                (None, Some(_)) => return std::cmp::Ordering::Less,
+                (Some(_), None) => return std::cmp::Ordering::Greater,
+            }
+        }
+    });
 }
 
 pub fn move_or_copy(src: &Path, dst: &Path) -> Result<()> {
