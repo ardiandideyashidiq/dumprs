@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use backhand::{FilesystemReader, InnerNode};
 use erofs_rs::backend::SliceImage;
 use erofs_rs::EroFS;
 use ext4_view::{Ext4, Ext4Read};
@@ -8,7 +9,7 @@ use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -57,7 +58,15 @@ pub fn extract_filesystem(image_path: &Path, output_dir: &Path) -> Result<()> {
         }
     }
 
-    // 3. Try MediaTek mkimage container (e.g. MTK modem.img / md1img)
+    // 3. Try pure-Rust SquashFS
+    match try_extract_squashfs(slice, output_dir, part_name) {
+        Ok(()) => return Ok(()),
+        Err(e) => {
+            debug!(partition = part_name, error = ?e, "fs.squashfs.probe_failed");
+        }
+    }
+
+    // 4. Try MediaTek mkimage container (e.g. MTK modem.img / md1img)
     match try_extract_mtk(slice, output_dir, part_name) {
         Ok(()) => return Ok(()),
         Err(e) => {
@@ -65,7 +74,7 @@ pub fn extract_filesystem(image_path: &Path, output_dir: &Path) -> Result<()> {
         }
     }
 
-    // 4. Try pure-Rust 7z decompression as final fallback
+    // 5. Try pure-Rust 7z decompression fallback
     if start == 0 && end == mmap.len() {
         match sevenz_rust2::decompress_file(image_path, output_dir) {
             Ok(()) => {
@@ -78,8 +87,16 @@ pub fn extract_filesystem(image_path: &Path, output_dir: &Path) -> Result<()> {
         }
     }
 
+    // 6. Try host 7zz / 7z CLI fallback (for exotic filesystems like F2FS/CramFS)
+    match try_extract_7zz_cli(image_path, output_dir, part_name) {
+        Ok(()) => return Ok(()),
+        Err(e) => {
+            debug!(partition = part_name, error = ?e, "fs.7zz_cli.probe_failed");
+        }
+    }
+
     bail!(
-        "Failed to extract filesystem image {} (tried erofs, ext4, mtk, 7z)",
+        "Failed to extract filesystem image {} (tried erofs, ext4, squashfs, mtk, 7z)",
         image_path.display()
     )
 }
@@ -92,10 +109,172 @@ pub fn extract_filesystem_slice(slice: &[u8], output_dir: &Path, part_name: &str
     if try_extract_ext4_slice(slice, output_dir, part_name).is_ok() {
         return Ok(());
     }
+    if try_extract_squashfs(slice, output_dir, part_name).is_ok() {
+        return Ok(());
+    }
     if try_extract_mtk(slice, output_dir, part_name).is_ok() {
         return Ok(());
     }
     bail!("Failed to extract filesystem slice for {}", part_name)
+}
+
+fn try_extract_squashfs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result<()> {
+    if slice.len() < 4 || &slice[0..4] != b"hsqs" {
+        bail!("Not a SquashFS image");
+    }
+    let start_time = Instant::now();
+    let img_size = slice.len() as u64;
+    let cursor = Cursor::new(slice);
+    let filesystem = FilesystemReader::from_reader(cursor)
+        .map_err(|e| anyhow::anyhow!("SquashFS parse failed: {:?}", e))?;
+    let pb = ByteProgress::new(part_name, img_size);
+
+    let mut regular_files = Vec::new();
+    let mut symlinks_extracted = 0u64;
+
+    for node in filesystem.files() {
+        let path = &node.fullpath;
+        let rel_path = path.strip_prefix("/").unwrap_or(path);
+        if rel_path.as_os_str().is_empty() {
+            continue;
+        }
+        let target = output_dir.join(rel_path);
+
+        match &node.inner {
+            InnerNode::Dir(_) => {
+                if fs::create_dir(&target).is_err() {
+                    fs::create_dir_all(&target)?;
+                }
+                #[cfg(unix)]
+                if node.header.permissions != 0 {
+                    let _ = fs::set_permissions(
+                        &target,
+                        std::fs::Permissions::from_mode(node.header.permissions as u32),
+                    );
+                }
+            }
+            InnerNode::File(file) => {
+                if let Some(parent) = target.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                regular_files.push((file, target, node.header.permissions));
+            }
+            InnerNode::Symlink(symlink) => {
+                if let Some(parent) = target.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let link_target = &symlink.link;
+                #[cfg(unix)]
+                {
+                    let _ = std::os::unix::fs::symlink(link_target, &target);
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = fs::write(&target, link_target.to_string_lossy().as_bytes());
+                }
+                symlinks_extracted += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let files_extracted = symlinks_extracted + regular_files.len() as u64;
+    let bytes_extracted = AtomicU64::new(0);
+
+    regular_files
+        .into_par_iter()
+        .with_min_len(16)
+        .try_for_each(|(file, target, permissions)| -> Result<()> {
+            let mut reader = filesystem.file(file).reader();
+            let mut file_bytes = 0u64;
+            FS_COPY_BUF.with(|cell| -> Result<()> {
+                let mut copy_buf = cell.borrow_mut();
+                if copy_buf.len() < 4 * 1024 * 1024 {
+                    copy_buf.resize(4 * 1024 * 1024, 0);
+                }
+                let out_file = File::create(&target)
+                    .with_context(|| format!("Failed to create {}", target.display()))?;
+                let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, out_file);
+                loop {
+                    let n = reader.read(&mut copy_buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    writer.write_all(&copy_buf[..n])?;
+                    file_bytes += n as u64;
+                }
+                writer.flush()?;
+                #[cfg(unix)]
+                if permissions != 0 {
+                    let _ = fs::set_permissions(
+                        &target,
+                        std::fs::Permissions::from_mode(permissions as u32),
+                    );
+                }
+                Ok(())
+            })?;
+            bytes_extracted.fetch_add(file_bytes, Ordering::Relaxed);
+            pb.inc(file_bytes);
+            Ok(())
+        })?;
+
+    let bytes_extracted = bytes_extracted.load(Ordering::Relaxed);
+    pb.finish();
+    info!(
+        partition = part_name,
+        fs = "squashfs",
+        files = files_extracted,
+        size = %HumanBytes(bytes_extracted),
+        duration = %HumanDuration(start_time.elapsed()),
+        "fs.extract.done"
+    );
+    Ok(())
+}
+
+fn try_extract_7zz_cli(image_path: &Path, output_dir: &Path, part_name: &str) -> Result<()> {
+    let sevenz_cmd = if which_exists("7zz") {
+        "7zz"
+    } else if which_exists("7z") {
+        "7z"
+    } else {
+        bail!("7zz/7z not found in PATH");
+    };
+
+    let start_time = Instant::now();
+    let mut cmd = std::process::Command::new(sevenz_cmd);
+    cmd.arg("x")
+        .arg("-y")
+        .arg(format!("-o{}/", output_dir.display()))
+        .arg(image_path);
+    if sevenz_cmd == "7zz" {
+        cmd.arg("-snld");
+    }
+    let output = cmd.output().with_context(|| format!("Failed to execute {}", sevenz_cmd))?;
+    if !output.status.success() {
+        bail!(
+            "{} failed with exit code {:?}: {}",
+            sevenz_cmd,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    info!(
+        partition = part_name,
+        tool = sevenz_cmd,
+        duration = %HumanDuration(start_time.elapsed()),
+        "fs.extract.7zz_cli.done"
+    );
+    Ok(())
+}
+
+fn which_exists(prog: &str) -> bool {
+    std::process::Command::new(prog)
+        .arg("--help")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn try_extract_mtk(slice: &[u8], output_dir: &Path, part_name: &str) -> Result<()> {
