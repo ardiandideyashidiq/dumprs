@@ -16,7 +16,6 @@ flate2 = { version = "1.0", default-features = false, features = ["zlib-rs"] }
 bzip2 = "0.4"
 xz2 = "0.1"
 sha2 = "0.10"
-regex = "1.11"
 anyhow = "1.0"
 walkdir = "2.5"
 byteorder = "1.5"

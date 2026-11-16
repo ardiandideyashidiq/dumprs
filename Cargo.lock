@@ -680,7 +680,6 @@ dependencies = [
  "prost-build",
  "prost-types",
  "rayon",
- "regex",
  "sevenz-rust2",
  "sha2 0.10.9",
  "tar",
