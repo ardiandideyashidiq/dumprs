@@ -16,6 +16,7 @@ High-performance Rust extractor for Android firmware and OTA images, based on [d
   - **Filesystem Unpacking**: Native userspace reading and extraction of `ext4` and `erofs` partitions.
   - **Vendor Archives**: Support for `.zip`, `.tar`, `.7z`, `.kdz`, and raw boot images.
 - **Workflow Control**: Resume capability, partition filtering, and debug staging directories.
+- **SELinux / Permission Sidecars**: Optional generation of `fs_config` and `file_contexts` for repacking workflows.
 
 ## Installation
 
@@ -83,6 +84,9 @@ dumprs ota.zip --resume
 
 # Keep intermediate extracted files for debugging
 dumprs ota.zip --debug
+
+# Extract and emit fs_config / file_contexts sidecars for repacking
+dumprs ota.zip --emit-fs-metadata --fs-metadata-fstype erofs
 ```
 
 ### CLI Options
@@ -96,6 +100,13 @@ dumprs ota.zip --debug
 | `--skip-extract` | Skip Step 1 (reuse existing `temp_extracted_archive`) |
 | `--skip-prepare` | Skip Step 2 (reuse existing `temp_raw_images`) |
 | `-d, --debug` | Retain temporary directories for debugging |
+| `--emit-fs-metadata` | Generate `fs_config` and `file_contexts` for extracted partitions |
+| `--fs-metadata-fstype <FSTYPE>` | Sidecar conventions: `ext4` (default), `erofs`, or `f2fs` |
+| `--fs-metadata-bin-only` | Only generate entries under `bin/` directories |
+| `--fs-metadata-vbin <CONTEXT>` | Override vendor/odm `bin/` SELinux context |
+| `--fs-metadata-sbin <CONTEXT>` | Override system `bin/` SELinux context |
+| `--fs-metadata-dir <DIR>` | Root directory for generated `config/` files |
+| `--fs-metadata-dry-run` | Count missing entries without writing files |
 | `-h, --help` | Print help |
 
 ## Credits
@@ -116,4 +127,9 @@ dumprs ota.zip --debug
 
 ## License
 
-Apache-2.0 or MIT
+GPL-3.0-only. See [`LICENSE`](LICENSE) for the full text and
+[`CREDITS.md`](CREDITS.md) for upstream attributions.
+
+The `fs_config`/`file_contexts` generator in `src/utils/fs_metadata/` is
+adapted from Danda420's GPL-3.0-only tools, so dumprs is distributed under the
+same license.

@@ -23,6 +23,8 @@ pub struct DumpOptions {
     pub skip_prepare: bool,
     pub resume: bool,
     pub partitions: Vec<String>,
+    /// Emit `fs_config` and `file_contexts` sidecars for extracted partitions.
+    pub fs_metadata: Option<crate::utils::fs_metadata::FsMetadataOptions>,
 }
 
 pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<PathBuf> {
@@ -106,6 +108,7 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
             &options.partitions,
             options.resume,
             cleanup_temp,
+            options.fs_metadata.as_ref(),
         )?;
         info!(
             step = 3,

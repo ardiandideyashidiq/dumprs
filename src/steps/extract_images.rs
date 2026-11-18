@@ -12,7 +12,11 @@ use crate::utils::firmware::{
     HeaderKind, ScatterInfo, is_excluded_partition_name, is_scatter_filename,
     matches_partition_filter, sniff_file_header_kind,
 };
+use crate::utils::fs_metadata::{
+    Config as FsMetadataConfig, FsMetadataOptions, generate_file_contexts, generate_fs_config,
+};
 use crate::utils::partitions::{PartitionType, get_partition_names, get_partition_type};
+
 pub fn extract_images(
     raw_images_path: &Path,
     output_path: &Path,
@@ -25,6 +29,7 @@ pub fn extract_images(
         filter_partitions,
         resume,
         false,
+        None,
     )
 }
 
@@ -34,6 +39,7 @@ pub fn extract_images_with_cleanup(
     filter_partitions: &[String],
     resume: bool,
     cleanup_raw: bool,
+    fs_metadata: Option<&FsMetadataOptions>,
 ) -> Result<()> {
     let mut partitions: Vec<_> = get_partition_names()
         .into_iter()
@@ -135,6 +141,14 @@ pub fn extract_images_with_cleanup(
             }
         });
 
+    if let Some(options) = fs_metadata {
+        let names: Vec<&str> = partitions
+            .iter()
+            .map(|(partition, ..)| *partition)
+            .collect();
+        emit_fs_metadata(output_path, &names, options)?;
+    }
+
     extract_extra_firmware_and_scatter(
         raw_images_path,
         output_path,
@@ -144,6 +158,67 @@ pub fn extract_images_with_cleanup(
     )?;
     info!(count = partitions.len(), "partitions.extract.done");
     Ok(())
+}
+
+/// Write `fs_config` and `file_contexts` sidecars for extracted partitions.
+fn emit_fs_metadata(
+    output_path: &Path,
+    partitions: &[&str],
+    options: &FsMetadataOptions,
+) -> Result<()> {
+    let config_root = options
+        .config_root
+        .clone()
+        .unwrap_or_else(|| output_path.join("config"));
+
+    for partition in partitions {
+        let partition_dir = output_path.join(partition);
+        if !partition_dir.is_dir() {
+            continue;
+        }
+        let partition_config = config_root.join(partition);
+        fs::create_dir_all(&partition_config)?;
+
+        let fs_config = build_metadata_config(
+            &partition_dir,
+            partition_config.join(format!("{partition}_fs_config")),
+            options,
+        )?;
+        let fs_report = generate_fs_config(&fs_config)?;
+
+        let contexts = build_metadata_config(
+            &partition_dir,
+            partition_config.join(format!("{partition}_file_contexts")),
+            options,
+        )?;
+        let context_report = generate_file_contexts(&contexts)?;
+
+        info!(
+            partition,
+            fs_config_missing = fs_report.missing,
+            file_contexts_missing = context_report.missing,
+            "partition.fs_metadata"
+        );
+    }
+    Ok(())
+}
+
+fn build_metadata_config(
+    partition_dir: &Path,
+    output: std::path::PathBuf,
+    options: &FsMetadataOptions,
+) -> Result<FsMetadataConfig> {
+    let mut builder = FsMetadataConfig::builder(partition_dir, output)
+        .fstype(options.fstype)
+        .mode(options.mode)
+        .dry_run(options.dry_run);
+    if let Some(context) = &options.vendor_bin_context {
+        builder = builder.vendor_bin_context(context);
+    }
+    if let Some(context) = &options.system_bin_context {
+        builder = builder.system_bin_context(context);
+    }
+    builder.build()
 }
 
 enum ExtraItemKind {

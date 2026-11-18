@@ -1,6 +1,7 @@
 pub mod device_info;
 pub mod files;
 pub mod firmware;
+pub mod fs_metadata;
 pub mod multipartitions;
 pub mod partitions;
 pub mod progress;
