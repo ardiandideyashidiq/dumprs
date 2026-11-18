@@ -17,6 +17,11 @@ license text is reproduced in [`LICENSE`](LICENSE). The adapted Rust code in
 this repository is distributed under the same GPL-3.0-only license, with
 modifications by `rdndds <rdndds@gmail.com>`.
 
+## Filesystem writers
+
+The EROFS writer uses [rust-fs-erofs](https://github.com/antimatter-studios/rust-fs-erofs)
+by Christopher Thomas (MIT), a clean-room pure-Rust EROFS reader and builder.
+
 ## Other projects
 
 See the `Credits` section of [`README.md`](README.md) for the firmware

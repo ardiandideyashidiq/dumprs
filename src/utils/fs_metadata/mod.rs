@@ -13,6 +13,7 @@ pub mod escape;
 pub mod file_contexts;
 pub mod fs_config;
 pub mod reader;
+pub mod sidecar;
 pub mod types;
 
 pub use file_contexts::generate_file_contexts;

@@ -1,8 +1,9 @@
-use anyhow::Result;
-use clap::Parser;
+use anyhow::{Result, anyhow};
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use std::env;
 use std::path::PathBuf;
 
+use ::dumprs::formats::erofs_writer::{ErofsRepackOptions, repack_erofs};
 use ::dumprs::utils::fs_metadata::{FilesystemType, FsMetadataOptions, GenerationMode};
 use ::dumprs::utils::progress::init_logging;
 use ::dumprs::{DumpOptions, dumprs};
@@ -10,12 +11,15 @@ use ::dumprs::{DumpOptions, dumprs};
 #[derive(Parser, Debug)]
 #[command(
     name = "dumprs",
-    about = "Dumprs - High-performance Android firmware extractor"
+    about = "Dumprs - High-performance Android firmware extractor and repacker"
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Path to a device OTA or firmware archive
     #[arg(value_name = "FILE")]
-    file: PathBuf,
+    file: Option<PathBuf>,
 
     /// Custom output folder
     #[arg(short, long, value_name = "OUTPUT")]
@@ -75,19 +79,52 @@ struct Args {
     fs_metadata_dry_run: bool,
 }
 
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Repack an extracted partition directory into a filesystem image
+    Repack(RepackArgs),
+}
+
+#[derive(ClapArgs, Debug)]
+struct RepackArgs {
+    /// Directory containing the extracted partition tree
+    #[arg(short, long, value_name = "DIR")]
+    input: PathBuf,
+
+    /// Image file to write
+    #[arg(short, long, value_name = "IMAGE")]
+    output: PathBuf,
+
+    /// Partition name used to interpret sidecar paths
+    #[arg(long, default_value = "system")]
+    partition: String,
+
+    /// fs_config sidecar from extraction
+    #[arg(long, value_name = "FILE")]
+    fs_config: Option<PathBuf>,
+
+    /// file_contexts sidecar from extraction
+    #[arg(long, value_name = "FILE")]
+    file_contexts: Option<PathBuf>,
+
+    /// Block size as power of two (12 = 4096 bytes)
+    #[arg(long, default_value_t = 12)]
+    blkszbits: u8,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
-
     init_logging();
 
+    if let Some(Commands::Repack(repack)) = args.command {
+        return run_repack(repack);
+    }
+
+    let file = args.file.ok_or_else(|| anyhow!("missing FILE argument"))?;
     let output = match args.output {
         Some(out) => out,
         None => {
-            let stem = args
-                .file
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("dump");
+            let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("dump");
             env::current_dir()?.join(stem)
         }
     };
@@ -119,7 +156,20 @@ fn main() -> Result<()> {
         fs_metadata,
     };
 
-    let _output_path = dumprs(&args.file, &output, &options)?;
+    let _output_path = dumprs(&file, &output, &options)?;
+    Ok(())
+}
 
+fn run_repack(args: RepackArgs) -> Result<()> {
+    let options = ErofsRepackOptions {
+        input: args.input,
+        output: args.output.clone(),
+        partition: args.partition,
+        fs_config: args.fs_config,
+        file_contexts: args.file_contexts,
+        blkszbits: args.blkszbits,
+    };
+    let size = repack_erofs(&options)?;
+    println!("Repacked {} ({} bytes)", args.output.display(), size);
     Ok(())
 }

@@ -1,4 +1,5 @@
 pub mod bootimg;
+pub mod erofs_writer;
 pub mod fs_extract;
 pub mod kdz;
 pub mod liblp;

@@ -17,6 +17,7 @@ High-performance Rust extractor for Android firmware and OTA images, based on [d
   - **Vendor Archives**: Support for `.zip`, `.tar`, `.7z`, `.kdz`, and raw boot images.
 - **Workflow Control**: Resume capability, partition filtering, and debug staging directories.
 - **SELinux / Permission Sidecars**: Optional generation of `fs_config` and `file_contexts` for repacking workflows.
+- **EROFS Repacking**: Rebuild an extracted partition tree into an EROFS image while preserving uid/gid/mode and SELinux labels from the sidecars.
 
 ## Installation
 
@@ -88,6 +89,23 @@ dumprs ota.zip --debug
 # Extract and emit fs_config / file_contexts sidecars for repacking
 dumprs ota.zip --emit-fs-metadata --fs-metadata-fstype erofs
 ```
+
+### Repack an extracted partition
+
+```bash
+# After extracting with --emit-fs-metadata, rebuild a partition image.
+dumprs repack \
+  --input dump/system \
+  --output system.erofs.img \
+  --partition system \
+  --fs-config dump/config/system/system_fs_config \
+  --file-contexts dump/config/system/system_file_contexts
+```
+
+The writer currently supports EROFS. `fs_config` supplies uid/gid/mode and
+`file_contexts` supplies the `security.selinux` xattr, so a round trip keeps the
+original metadata. ext4, super, payload/OTA and f2fs writers are not yet
+implemented.
 
 ### CLI Options
 
