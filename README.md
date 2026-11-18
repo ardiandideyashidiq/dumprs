@@ -1,6 +1,6 @@
 # dumprs
 
-High-performance, pure-Rust extractor for Android firmware and OTA images, based on [dumpyara](https://github.com/sebaubuntu-python/dumpyara).
+High-performance Rust extractor for Android firmware and OTA images, based on [dumpyara](https://github.com/sebaubuntu-python/dumpyara).
 
 > [!WARNING]
 > **Work in Progress (WIP) & Experimental**: This project is under active development and has not yet been thoroughly tested across a wide variety of OEM firmware files and partition formats. Bugs, missing edge-case handling, or extraction errors may occur. Bug reports and sample payloads are welcome!
@@ -19,13 +19,46 @@ High-performance, pure-Rust extractor for Android firmware and OTA images, based
 
 ## Installation
 
-Ensure you have Rust (2024 edition / latest stable) and `protoc` installed:
+### Prebuilt binaries (nightly)
+
+Automated nightly builds are published for two Linux targets:
+
+| Target | Architecture | Asset |
+| :--- | :--- | :--- |
+| `x86_64-unknown-linux-gnu` | x86_64 | `dumprs-linux-x86_64.tar.gz` |
+| `aarch64-unknown-linux-gnu` | ARM64 / AArch64 | `dumprs-linux-aarch64.tar.gz` |
+
+Each archive is accompanied by a `.sha256` checksum file. Both are attached to
+the [`nightly` pre-release](https://github.com/ardiandideyashidiq/dumprs/releases/tag/nightly)
+on the GitHub Releases page. Verify a download with:
+
+```bash
+sha256sum --check dumprs-linux-aarch64.tar.gz.sha256
+```
+
+### Build from source
+
+Ensure you have Rust (2024 edition / latest stable) installed. The protobuf
+descriptor is pre-generated (`update_metadata.desc`), so `protoc` is not required:
 
 ```bash
 cargo build --release
 ```
 
 Binary will be located at `target/release/dumprs`.
+
+To cross-compile for ARM64 from an x86_64 Linux host, install the target and a
+cross linker (the bundled C dependencies `bzip2-sys`, `lzma-sys`, and `zstd-sys`
+need a C compiler for the target):
+
+```bash
+rustup target add aarch64-unknown-linux-gnu
+sudo apt-get install -y gcc-aarch64-linux-gnu
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+  cargo build --release --target aarch64-unknown-linux-gnu
+```
+
+Binary will be located at `target/aarch64-unknown-linux-gnu/release/dumprs`.
 
 ## Usage
 
@@ -56,15 +89,14 @@ dumprs ota.zip --debug
 
 | Flag | Description |
 | :--- | :--- |
-| `<FILE>` | Path to device OTA or firmware archive |
-| `-o, --output <DIR>` | Custom output directory (defaults to file stem) |
-| `-p, --partition <NAME>` | Extract only specified partition(s) (can be used multiple times) |
-| `-r, --resume` | Resume extraction from existing temp directories |
-| `--skip-extract` | Skip archive unpacking step (`temp_extracted_archive`) |
-| `--skip-prepare` | Skip raw image preparation step (`temp_raw_images`) |
+| `<FILE>` | Path to a device OTA or firmware archive |
+| `-o, --output <OUTPUT>` | Custom output folder (defaults to the file stem) |
+| `-p, --partition <PARTITION>` | Extract only specified partition(s); can be repeated |
+| `-r, --resume` | Resume from existing temporary directories without re-extracting |
+| `--skip-extract` | Skip Step 1 (reuse existing `temp_extracted_archive`) |
+| `--skip-prepare` | Skip Step 2 (reuse existing `temp_raw_images`) |
 | `-d, --debug` | Retain temporary directories for debugging |
-| `-h, --help` | Print help information |
-| `-V, --version` | Print version |
+| `-h, --help` | Print help |
 
 ## Credits
 
