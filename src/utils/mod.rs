@@ -4,6 +4,7 @@ pub mod dump_metadata;
 pub mod files;
 pub mod firmware;
 pub mod fs_metadata;
+pub mod input_handling;
 pub mod multipartitions;
 pub mod oem_image;
 pub mod oem_postprocess;

@@ -16,6 +16,9 @@ use crate::utils::dump_metadata::{
     generate_board_info, preserve_auxiliary_files, write_all_files_list,
 };
 use crate::utils::files::{clear_in_memory_images, rmtree_recursive, set_allow_early_extract};
+use crate::utils::input_handling::{
+    InputKind, classify_input, plan_input_chain, stage_input_files, validate_input,
+};
 use crate::utils::partitions::get_partition_names;
 
 #[derive(Debug, Clone, Default)]
@@ -43,10 +46,23 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
     fs::create_dir_all(&extracted_archive_path)?;
     fs::create_dir_all(&raw_images_path)?;
 
+    let input_kind = classify_input(file);
+    validate_input(&input_kind)?;
+    info!(stages = ?plan_input_chain(&input_kind), "input.plan");
+    let (effective_file, staged_input) = match input_kind {
+        InputKind::FirmwareDirectory(directory) => {
+            stage_input_files(&directory, &extracted_archive_path)?;
+            (None, true)
+        }
+        InputKind::SingleFile(path) | InputKind::Archive(path) => (Some(path), false),
+        _ => unreachable!("validate_input rejected this kind"),
+    };
+
     let has_extracted_files = fs::read_dir(&extracted_archive_path)
         .map(|mut d| d.next().is_some())
         .unwrap_or(false);
-    let should_skip_extract = options.skip_extract || (options.resume && has_extracted_files);
+    let should_skip_extract =
+        options.skip_extract || staged_input || (options.resume && has_extracted_files);
 
     let has_raw_files = fs::read_dir(&raw_images_path)
         .map(|mut d| d.next().is_some())
@@ -80,7 +96,8 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
         } else {
             let step_start = Instant::now();
             info!(step = 1, archive = %file.display(), "step.extract_archive.start");
-            extract_archive(file, &extracted_archive_path, false)?;
+            let archive = effective_file.as_deref().unwrap_or(file);
+            extract_archive(archive, &extracted_archive_path, false)?;
             info!(
                 step = 1,
                 duration = %HumanDuration(step_start.elapsed()),
