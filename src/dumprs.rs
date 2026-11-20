@@ -22,6 +22,8 @@ pub struct DumpOptions {
     pub skip_extract: bool,
     pub skip_prepare: bool,
     pub resume: bool,
+    /// Skip the boot/kernel artifact generators (AVB, IKconfig, DTB/DTS).
+    pub skip_boot_artifacts: bool,
     pub partitions: Vec<String>,
     /// Emit `fs_config` and `file_contexts` sidecars for extracted partitions.
     pub fs_metadata: Option<crate::utils::fs_metadata::FsMetadataOptions>,
@@ -109,6 +111,7 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
             options.resume,
             cleanup_temp,
             options.fs_metadata.as_ref(),
+            !options.skip_boot_artifacts,
         )?;
         info!(
             step = 3,

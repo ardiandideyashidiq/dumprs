@@ -18,6 +18,7 @@ High-performance Rust extractor for Android firmware and OTA images, based on [d
 - **Workflow Control**: Resume capability, partition filtering, and debug staging directories.
 - **SELinux / Permission Sidecars**: Optional generation of `fs_config` and `file_contexts` for repacking workflows.
 - **EROFS Repacking**: Rebuild an extracted partition tree into an EROFS image while preserving uid/gid/mode and SELinux labels from the sidecars.
+- **Boot/kernel artifacts**: `avb.txt` (avbtool-compatible vbmeta dump), `ikconfig` (embedded kernel config, including gzip/xz/bzip2/LZMA/LZ4/LZOP/zstd payloads with LZOP checksum verification), `boot_kallsyms.txt` / `kernel_kallsyms.txt` (absolute and base-relative kallsyms), a virtual-address-mapped `boot.elf` carrying the recovered symbols, and split DTBs with DTS text — all written into the corresponding partition directory. Enabled by default; disable with `--skip-boot-artifacts`.
 
 ## Installation
 
@@ -118,6 +119,7 @@ implemented.
 | `--skip-extract` | Skip Step 1 (reuse existing `temp_extracted_archive`) |
 | `--skip-prepare` | Skip Step 2 (reuse existing `temp_raw_images`) |
 | `-d, --debug` | Retain temporary directories for debugging |
+| `--skip-boot-artifacts` | Do not generate AVB / IKconfig / kallsyms / ELF / DTB-DTS artifacts |
 | `--emit-fs-metadata` | Generate `fs_config` and `file_contexts` for extracted partitions |
 | `--fs-metadata-fstype <FSTYPE>` | Sidecar conventions: `ext4` (default), `erofs`, or `f2fs` |
 | `--fs-metadata-bin-only` | Only generate entries under `bin/` directories |

@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::GzDecoder;
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
@@ -25,6 +26,13 @@ pub struct BootImgInfo {
     pub dtb_size: u32,
     pub recovery_dtbo_size: u32,
     pub cmdline: String,
+    pub os_version: String,
+    pub os_patch_level: String,
+    pub base_addr: String,
+    pub kernel_offset: String,
+    pub ramdisk_offset: String,
+    pub tags_offset: String,
+    pub board: String,
 }
 
 impl std::fmt::Display for BootImgInfo {
@@ -38,8 +46,61 @@ impl std::fmt::Display for BootImgInfo {
         writeln!(f, "dtb_size: {}", self.dtb_size)?;
         writeln!(f, "recovery_dtbo_size: {}", self.recovery_dtbo_size)?;
         writeln!(f, "cmdline: {}", self.cmdline)?;
+        if !self.os_version.is_empty() {
+            writeln!(f, "os_version: {}", self.os_version)?;
+            writeln!(f, "os_patch_level: {}", self.os_patch_level)?;
+        }
         Ok(())
     }
+}
+
+/// Write the `img_info` file in the format produced by DumprX's
+/// `unpackboot.sh`, alongside dumprs' own `info.txt`.
+pub fn write_img_info(info: &BootImgInfo, output_path: &Path) -> Result<()> {
+    let mut text = String::new();
+    text.push_str("kernel=kernel\nramdisk=ramdisk\n");
+    let _ = writeln!(text, "page_size={}", info.page_size);
+    let _ = writeln!(text, "kernel_size={}", info.kernel_size);
+    let _ = writeln!(text, "ramdisk_size={}", info.ramdisk_size);
+    if info.second_size > 0 {
+        let _ = writeln!(text, "second_size={}", info.second_size);
+    }
+    if info.dtb_size > 0 {
+        let _ = writeln!(text, "dtb_size={}", info.dtb_size);
+    }
+    if !info.base_addr.is_empty() {
+        let _ = writeln!(text, "base_addr={}", info.base_addr);
+        let _ = writeln!(text, "kernel_offset={}", info.kernel_offset);
+        let _ = writeln!(text, "ramdisk_offset={}", info.ramdisk_offset);
+        let _ = writeln!(text, "tags_offset={}", info.tags_offset);
+    }
+    if !info.os_version.is_empty() {
+        let _ = writeln!(text, "os_version={}", info.os_version);
+        let _ = writeln!(text, "os_patch_level={}", info.os_patch_level);
+    }
+    let escaped = info.cmdline.replace('\'', "'\\''");
+    let _ = writeln!(text, "cmd_line='{escaped}'");
+    let _ = writeln!(text, "board=\"{}\"", info.board);
+    fs::write(output_path.join("img_info"), text)?;
+    Ok(())
+}
+
+/// Decode the `os_version` field of an Android boot header into the
+/// `(version, patch_level)` pair used by `unpackboot.sh`.
+pub fn decode_os_version(os_version: u32) -> (String, String) {
+    if os_version == 0 {
+        return (String::new(), String::new());
+    }
+    let patch = os_version & 0x7ff;
+    let version = os_version >> 11;
+    let decoded_version = format!(
+        "{}.{}.{}",
+        (version >> 14) & 0x7f,
+        (version >> 7) & 0x7f,
+        version & 0x7f
+    );
+    let decoded_patch = format!("{}:{}", (patch >> 4) + 2000, patch & 0x0f);
+    (decoded_version, decoded_patch)
 }
 
 fn align_to(val: u64, align: u64) -> u64 {
@@ -75,12 +136,12 @@ pub fn extract_bootimg(image_path: &Path, output_path: &Path) -> Result<()> {
 fn extract_standard_bootimg(mmap: &[u8], output_path: &Path) -> Result<()> {
     let mut cursor = &mmap[8..];
     let kernel_size = cursor.read_u32::<LittleEndian>()?;
-    let _kernel_addr = cursor.read_u32::<LittleEndian>()?;
+    let kernel_addr = cursor.read_u32::<LittleEndian>()?;
     let ramdisk_size = cursor.read_u32::<LittleEndian>()?;
-    let _ramdisk_addr = cursor.read_u32::<LittleEndian>()?;
+    let ramdisk_addr = cursor.read_u32::<LittleEndian>()?;
     let second_size = cursor.read_u32::<LittleEndian>()?;
     let _second_addr = cursor.read_u32::<LittleEndian>()?;
-    let _tags_addr = cursor.read_u32::<LittleEndian>()?;
+    let tags_addr = cursor.read_u32::<LittleEndian>()?;
     let page_size = cursor.read_u32::<LittleEndian>()?;
     let header_version = cursor.read_u32::<LittleEndian>()?;
 
@@ -93,6 +154,12 @@ fn extract_standard_bootimg(mmap: &[u8], output_path: &Path) -> Result<()> {
         second_size,
         ..Default::default()
     };
+
+    let base_addr = kernel_addr.saturating_sub(0x8000);
+    info.base_addr = format!("0x{base_addr:08x}");
+    info.kernel_offset = format!("{:08x}", kernel_addr.saturating_sub(base_addr));
+    info.ramdisk_offset = format!("{:08x}", ramdisk_addr.saturating_sub(base_addr));
+    info.tags_offset = format!("{:08x}", tags_addr.saturating_sub(base_addr));
 
     let (kernel_offset, ramdisk_offset, second_offset, recovery_dtbo_offset, dtb_offset);
 
@@ -112,7 +179,16 @@ fn extract_standard_bootimg(mmap: &[u8], output_path: &Path) -> Result<()> {
         recovery_dtbo_offset = 0;
         dtb_offset = 0;
     } else {
-        let _os_version = cursor.read_u32::<LittleEndian>()?;
+        let os_version_raw = cursor.read_u32::<LittleEndian>()?;
+        let (os_version, os_patch_level) = decode_os_version(os_version_raw);
+        info.os_version = os_version;
+        info.os_patch_level = os_patch_level;
+        let name_buf = &cursor[..16.min(cursor.len())];
+        let name_end = name_buf
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(name_buf.len());
+        info.board = String::from_utf8_lossy(&name_buf[..name_end]).into_owned();
         cursor = &cursor[16..]; // skip name_buf
         let cmdline_buf = &cursor[..512];
         cursor = &cursor[512..];
@@ -151,6 +227,7 @@ fn extract_standard_bootimg(mmap: &[u8], output_path: &Path) -> Result<()> {
     }
 
     fs::write(output_path.join("info.txt"), info.to_string())?;
+    write_img_info(&info, output_path)?;
 
     if kernel_size > 0 {
         let start = kernel_offset as usize;
@@ -233,6 +310,7 @@ fn extract_vendor_bootimg(mmap: &[u8], output_path: &Path) -> Result<()> {
     };
 
     fs::write(output_path.join("info.txt"), info.to_string())?;
+    write_img_info(&info, output_path)?;
 
     let page = page_size as u64;
     let ramdisk_offset = page;

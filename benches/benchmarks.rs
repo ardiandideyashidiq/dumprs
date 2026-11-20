@@ -1,4 +1,10 @@
+#[path = "../tests/common/bench.rs"]
+mod bench_fixtures;
+
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use dumprs::formats::boot_artifacts::dtb::{dtb_to_dts, split_dtb};
+use dumprs::formats::boot_artifacts::ikconfig::extract_ikconfig;
+use dumprs::formats::boot_artifacts::kallsyms::find_kallsyms;
 use dumprs::formats::liblp::lpunpack;
 use dumprs::formats::sdat2img::sdat2img;
 use dumprs::formats::sparse::unsparse_file;
@@ -154,5 +160,37 @@ fn bench_liblp(c: &mut Criterion) {
     let _ = fs::remove_dir_all(dir);
 }
 
-criterion_group!(benches, bench_sdat2img, bench_sparse, bench_liblp);
+fn bench_boot_artifacts(c: &mut Criterion) {
+    let mut combined = bench_fixtures::dtb("first");
+    combined.extend_from_slice(&bench_fixtures::dtb("second"));
+    c.bench_function("dtb_split_and_dts", |b| {
+        b.iter(|| {
+            let blobs = split_dtb(black_box(&combined)).unwrap();
+            for blob in blobs {
+                black_box(dtb_to_dts(blob).unwrap());
+            }
+        })
+    });
+
+    let mut scan = vec![0u8; 32 * 1024 * 1024];
+    let config = bench_fixtures::ikconfig_gzip();
+    let at = scan.len() - config.len() - 64;
+    scan[at..at + config.len()].copy_from_slice(&config);
+    c.bench_function("ikconfig_scan_32mib", |b| {
+        b.iter(|| black_box(extract_ikconfig(black_box(&scan)).unwrap()))
+    });
+
+    let kernel = bench_fixtures::synthetic_kernel();
+    c.bench_function("kallsyms_find_1024", |b| {
+        b.iter(|| black_box(find_kallsyms(black_box(&kernel)).unwrap()))
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_sdat2img,
+    bench_sparse,
+    bench_liblp,
+    bench_boot_artifacts
+);
 criterion_main!(benches);

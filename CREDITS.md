@@ -22,6 +22,31 @@ modifications by `rdndds <rdndds@gmail.com>`.
 The EROFS writer uses [rust-fs-erofs](https://github.com/antimatter-studios/rust-fs-erofs)
 by Christopher Thomas (MIT), a clean-room pure-Rust EROFS reader and builder.
 
+## Boot artifacts
+
+The boot/kernel artifact generators in `src/formats/boot_artifacts/` stand on
+the following work:
+
+- [dtoolkit](https://github.com/google/dtoolkit) by Google (Apache-2.0 OR MIT)
+  for FDT/DTB parsing and DTS rendering.
+- [object](https://github.com/gimli-rs/object) by the gimli-rs project
+  (Apache-2.0 OR MIT) for ELF symbol output.
+- [sha1](https://github.com/RustCrypto/hashes) (MIT OR Apache-2.0) for AVB
+  public-key digests.
+- [lzma-rs](https://github.com/gendx/lzma-rs) by gendx (MIT) for LZMA-compressed
+  embedded kernel configs.
+- [lzo](https://github.com/SecurityRonin/lzo) by Security Ronin (Apache-2.0)
+  for the pure-Rust LZO1X decoder used with LZOP-compressed kernel configs.
+- [adler2](https://github.com/oyvindln/adler2) (0BSD OR MIT OR Apache-2.0) and
+  [crc32fast](https://github.com/srijs/rust-crc32fast) (MIT OR Apache-2.0) for
+  LZOP header, block and final-data checksum verification.
+- [proptest](https://github.com/proptest-rs/proptest) (MIT OR Apache-2.0) for
+  the property tests guarding the boot artifact parsers.
+- `avbtool.py` from AOSP `external/avb` for the `info_image` output format
+  reproduced by `avb.rs`.
+- [vmlinux-to-elf](https://github.com/marin-m/vmlinux-to-elf) by @marin-m
+  (GPL-3.0) for the kallsyms discovery heuristics.
+
 ## Other projects
 
 See the `Credits` section of [`README.md`](README.md) for the firmware

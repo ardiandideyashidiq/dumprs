@@ -1,3 +1,4 @@
+pub mod boot_artifacts;
 pub mod bootimg;
 pub mod erofs_writer;
 pub mod fs_extract;

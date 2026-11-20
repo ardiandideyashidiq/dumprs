@@ -41,6 +41,10 @@ struct Args {
     #[arg(short, long)]
     resume: bool,
 
+    /// Do not generate boot/kernel artifacts (AVB, IKconfig, DTB/DTS)
+    #[arg(long)]
+    skip_boot_artifacts: bool,
+
     /// Extract only specified partition(s) (e.g. -p system -p vendor)
     #[arg(short, long, value_name = "PARTITION")]
     partition: Vec<String>,
@@ -152,6 +156,7 @@ fn main() -> Result<()> {
         skip_extract: args.skip_extract,
         skip_prepare: args.skip_prepare,
         resume: args.resume,
+        skip_boot_artifacts: args.skip_boot_artifacts,
         partitions: args.partition,
         fs_metadata,
     };

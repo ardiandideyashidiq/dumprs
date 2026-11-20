@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{error, info};
 
+use crate::formats::boot_artifacts::generate as generate_boot_artifacts;
 use crate::formats::bootimg::extract_bootimg;
 use crate::formats::fs_extract::extract_filesystem;
 use crate::utils::files::{hardlink_or_copy, logical_image_size, was_early_extracted};
@@ -30,6 +31,7 @@ pub fn extract_images(
         resume,
         false,
         None,
+        true,
     )
 }
 
@@ -40,6 +42,7 @@ pub fn extract_images_with_cleanup(
     resume: bool,
     cleanup_raw: bool,
     fs_metadata: Option<&FsMetadataOptions>,
+    boot_artifacts: bool,
 ) -> Result<()> {
     let mut partitions: Vec<_> = get_partition_names()
         .into_iter()
@@ -98,6 +101,11 @@ pub fn extract_images_with_cleanup(
                     if let Err(e) = extract_bootimg(image_path, &partition_out) {
                         error!(partition, image = %image_path.display(), error = ?e, "partition.bootimg.failed");
                     }
+                    if boot_artifacts
+                        && let Err(e) = generate_boot_artifacts(image_path, &partition_out, partition)
+                    {
+                        error!(partition, image = %image_path.display(), error = ?e, "partition.boot_artifacts.failed");
+                    }
                     let copy_dest = output_path.join(format!("{}.img", partition));
                     let _ = hardlink_or_copy(image_path, &copy_dest);
                     if cleanup_raw {
@@ -140,6 +148,18 @@ pub fn extract_images_with_cleanup(
                 PartitionType::Logical => {}
             }
         });
+
+    // `dtbo` is a raw partition in dumprs, so it does not go through the
+    // boot-image branch above. Generate its DTB/DTS artifacts from the copy.
+    if boot_artifacts {
+        let dtbo_image = output_path.join("dtbo.img");
+        if dtbo_image.is_file() {
+            let dtbo_dir = output_path.join("dtbo");
+            if let Err(e) = generate_boot_artifacts(&dtbo_image, &dtbo_dir, "dtbo") {
+                error!(partition = "dtbo", error = ?e, "partition.boot_artifacts.failed");
+            }
+        }
+    }
 
     if let Some(options) = fs_metadata {
         let names: Vec<&str> = partitions
