@@ -8,6 +8,7 @@ mod temp_dir;
 
 use dumprs::formats::oem::amlogic::extract_amlogic;
 use dumprs::formats::oem::nb0::extract_nb0;
+use dumprs::formats::oem::pac::extract_pac;
 use dumprs::formats::oem::qfil::extract_qfil;
 use dumprs::formats::oem::update_app::extract_update_app;
 use dumprs::steps::oem::prepare_oem_containers;
@@ -337,6 +338,103 @@ fn prepare_oem_containers_extracts_nb0() {
     assert_eq!(
         fs::read(raw.join("system")).expect("system"),
         vec![b'S'; 512]
+    );
+}
+
+fn utf16_field(target: &mut [u8], value: &str) {
+    for (i, unit) in value.encode_utf16().enumerate() {
+        target[i * 2..i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+    }
+}
+
+fn pac_file(entries: &[(&str, u64)], payloads: &[&[u8]]) -> Vec<u8> {
+    const PAC_HEADER_SIZE: usize = 2124;
+    const FILE_HEADER_SIZE: usize = 2580;
+    let data_start = PAC_HEADER_SIZE + entries.len() * FILE_HEADER_SIZE;
+
+    let mut image = vec![0u8; data_start];
+    utf16_field(&mut image[0..44], "BP_R1.0.0");
+    let mut cursor = data_start;
+    for &(_, size) in entries {
+        cursor += size as usize;
+    }
+    image[44..48].copy_from_slice(&0u32.to_le_bytes());
+    image[48..52].copy_from_slice(&(cursor as u32).to_le_bytes());
+    image[1076..1080].copy_from_slice(&(entries.len() as u32).to_le_bytes());
+    image[1080..1084].copy_from_slice(&(PAC_HEADER_SIZE as u32).to_le_bytes());
+    image[2116..2120].copy_from_slice(&0xfffafffau32.to_le_bytes());
+
+    for (index, &(name, size)) in entries.iter().enumerate() {
+        let base = PAC_HEADER_SIZE + index * FILE_HEADER_SIZE;
+        image[base..base + 4].copy_from_slice(&(FILE_HEADER_SIZE as u32).to_le_bytes());
+        utf16_field(&mut image[base + 516..base + 1028], name);
+        image[base + 1540..base + 1544].copy_from_slice(&(size as u32).to_le_bytes());
+        let offset = entries[..index]
+            .iter()
+            .fold(data_start, |acc, &(_, previous)| acc + previous as usize);
+        image[base + 1552..base + 1556].copy_from_slice(&(offset as u32).to_le_bytes());
+    }
+    for payload in payloads {
+        image.extend_from_slice(payload);
+    }
+    image
+}
+
+/// Regression: PAC entries are located via `partitionsListStart` and each
+/// payload via its own data offset; the size must come from `loPartitionSize`.
+#[test]
+fn extracts_pac_partitions() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    let system = vec![b'A'; 4096];
+    let boot = vec![b'B'; 2048];
+    let image = pac_file(
+        &[("system.img", 4096), ("boot.img", 2048)],
+        &[&system, &boot],
+    );
+    let path = root.join("firmware.pac");
+    fs::write(&path, image).expect("pac written");
+
+    extract_pac(&path, &out).expect("pac extracted");
+
+    assert_eq!(fs::read(out.join("system.img")).expect("system"), system);
+    assert_eq!(fs::read(out.join("boot.img")).expect("boot"), boot);
+}
+
+/// Regression: an unsupported PAC version must be rejected rather than
+/// interpreting its headers with the wrong layout.
+#[test]
+fn rejects_unknown_pac_version() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    let mut image = pac_file(&[("system.img", 16)], &[&[b'A'; 16]]);
+    image[0..18].fill(0);
+    utf16_field(&mut image[0..44], "BP_R9.9.9");
+    let path = root.join("firmware.pac");
+    fs::write(&path, image).expect("pac written");
+
+    assert!(extract_pac(&path, &out).is_err());
+}
+
+/// Regression: a standalone `.pac` must be routed to the PAC parser instead
+/// of being left as an unrecognized firmware file.
+#[test]
+fn prepare_oem_containers_extracts_pac() {
+    let root = temp_dir::temp_dir();
+    let extracted = root.join("extracted");
+    let raw = root.join("raw");
+    fs::create_dir_all(&extracted).expect("extracted dir created");
+    fs::create_dir_all(&raw).expect("raw dir created");
+    let image = pac_file(&[("system.img", 512)], &[&[b'P'; 512]]);
+    fs::write(extracted.join("firmware.pac"), image).expect("pac written");
+
+    prepare_oem_containers(&extracted, &raw).expect("pac extracted");
+
+    assert_eq!(
+        fs::read(raw.join("system.img")).expect("system.img"),
+        vec![b'P'; 512]
     );
 }
 

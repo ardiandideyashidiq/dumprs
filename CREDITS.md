@@ -51,6 +51,9 @@ the following work:
 
 - `splituapp.py` by SuperR @XDA, as bundled in GPL-3.0-only DumprX, for the
   `UPDATE.APP` entry layout reproduced by `src/formats/oem/update_app.rs`.
+- The PAC record layout in `src/formats/oem/pac.rs` follows `pacExtractor.py`
+  by [HemanthJabalpuri](https://github.com/HemanthJabalpuri/pacextractor),
+  which is dedicated to the public domain.
 - The `.nb0` header layout in `src/formats/oem/nb0.rs` follows `nb0_extractor.py`
   bundled with MIO-KITCHEN-SOURCE; it was reimplemented in Rust, with the
   source script's chunk-overwrite bug corrected.
