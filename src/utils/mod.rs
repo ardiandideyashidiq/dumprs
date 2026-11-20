@@ -1,4 +1,5 @@
 pub mod device_info;
+pub mod dump_metadata;
 pub mod files;
 pub mod firmware;
 pub mod fs_metadata;

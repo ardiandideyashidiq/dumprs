@@ -11,9 +11,10 @@ use crate::steps::extract_archive::extract_archive;
 use crate::steps::extract_images::extract_images_with_cleanup;
 use crate::steps::prepare_images::prepare_images;
 use crate::utils::device_info::DeviceInfo;
-use crate::utils::files::{
-    clear_in_memory_images, rmtree_recursive, set_allow_early_extract, sort_files,
+use crate::utils::dump_metadata::{
+    generate_board_info, preserve_auxiliary_files, write_all_files_list,
 };
+use crate::utils::files::{clear_in_memory_images, rmtree_recursive, set_allow_early_extract};
 use crate::utils::partitions::get_partition_names;
 
 #[derive(Debug, Clone, Default)]
@@ -153,6 +154,14 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
         tracing::warn!("Failed to write README.md: {e}");
     }
 
+    // Preserve OEM metadata before the temporary archive directory is removed.
+    if let Err(error) = preserve_auxiliary_files(&extracted_archive_path, output_path) {
+        tracing::warn!(error = %error, "auxiliary.preserve_failed");
+    }
+    if let Err(error) = generate_board_info(output_path) {
+        tracing::warn!(error = %error, "board_info.generate_failed");
+    }
+
     let mut files_list = Vec::new();
     let mut total_bytes = 0u64;
     let mut root_files = 0usize;
@@ -216,16 +225,9 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
                     }
                 }
             }
-
-            sort_files(&mut files_list);
         },
     );
-    let mut content = String::with_capacity(files_list.len() * 40);
-    for f in &files_list {
-        content.push_str(&f.to_string_lossy());
-        content.push('\n');
-    }
-    fs::write(output_path.join("all_files.txt"), content)?;
+    write_all_files_list(output_path, &mut files_list)?;
     info!(
         step = 4,
         duration = %HumanDuration(finalize_start.elapsed()),
