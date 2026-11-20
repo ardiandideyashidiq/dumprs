@@ -1,3 +1,7 @@
+//! Parser and renderer for Android Verified Boot `vbmeta` structures.
+//!
+//! The text output mirrors `avbtool info_image`.
+
 use anyhow::{Result, bail};
 use byteorder::{BigEndian, ReadBytesExt};
 use sha1::{Digest, Sha1};
@@ -434,6 +438,11 @@ fn render_descriptor(out: &mut String, descriptor: &Descriptor) {
 /// Parse a vbmeta blob (standalone `vbmeta.img` or the blob referenced by an
 /// AVB footer at the end of a partition image) and render it exactly like
 /// `avbtool info_image`.
+///
+/// # Errors
+///
+/// Returns an error when the vbmeta header, blocks or descriptors are
+/// truncated or malformed.
 pub fn render_avb_info(data: &[u8], image_size: u64) -> Result<String> {
     let footer = parse_footer(data);
     let (vbmeta_offset, vbmeta_size) = match &footer {

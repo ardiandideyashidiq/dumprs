@@ -1,3 +1,7 @@
+//! Generation of boot and kernel artifacts from Android boot images.
+//!
+//! Every artifact is written into the partition directory, never the dump root.
+
 pub mod avb;
 pub mod dtb;
 pub mod ikconfig;
@@ -5,6 +9,7 @@ pub mod kallsyms;
 pub mod vmlinux_elf;
 
 use anyhow::{Context, Result};
+use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
 use tracing::{error, info, warn};
@@ -14,6 +19,11 @@ use tracing::{error, info, warn};
 /// All artifacts are written under `output_dir` (the partition directory):
 /// `avb.txt`, `ikconfig`, `dtb/*.dtb` and `dts/*.dts`. A failure in one
 /// generator is reported but does not discard the other artifacts.
+///
+/// # Errors
+///
+/// Returns an error only when the output directory or image cannot be
+/// created/read; individual generator failures are logged instead.
 pub fn generate(image: &Path, output_dir: &Path, partition: &str) -> Result<()> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("creating boot artifact dir {}", output_dir.display()))?;
@@ -32,17 +42,18 @@ pub fn generate(image: &Path, output_dir: &Path, partition: &str) -> Result<()> 
     }
 
     let kernel_path = output_dir.join("kernel");
-    let kernel_source = if kernel_path.is_file() {
-        kernel_path.as_path()
-    } else {
-        image
-    };
-    let kernel_data = match fs::read(kernel_source) {
-        Ok(data) => data,
-        Err(err) => {
-            error!(partition, error = %err, "boot.artifact.kernel.read_failed");
-            Vec::new()
+    // Reuse the image bytes when no extracted kernel is available: reading
+    // the same 64 MiB boot image twice would double peak memory here.
+    let kernel_data: Cow<'_, [u8]> = if kernel_path.is_file() {
+        match fs::read(&kernel_path) {
+            Ok(data) => Cow::Owned(data),
+            Err(err) => {
+                error!(partition, error = %err, "boot.artifact.kernel.read_failed");
+                Cow::Owned(Vec::new())
+            }
         }
+    } else {
+        Cow::Borrowed(image_data.as_slice())
     };
     if !kernel_data.is_empty() {
         match ikconfig::extract_ikconfig(&kernel_data) {

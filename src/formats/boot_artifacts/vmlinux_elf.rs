@@ -1,3 +1,5 @@
+//! Writer for an ELF image carrying raw kernel bytes and recovered symbols.
+
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
@@ -77,6 +79,10 @@ fn symbol_type(kind: char) -> u8 {
 /// Write an ELF64 image with the raw kernel in a virtual-address-mapped
 /// `.kernel` section plus a symbol table carrying the recovered kallsyms
 /// symbols. Mirrors the layout produced by vmlinux-to-elf's `ElfSymbolizer`.
+///
+/// # Errors
+///
+/// Returns an error when the output file cannot be written.
 pub fn write_elf(symbols: &[KallsymsSymbol], kernel: &[u8], output: &Path) -> Result<()> {
     let (machine, endian) = alignment(kernel);
     let base = symbols

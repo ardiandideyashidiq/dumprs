@@ -351,3 +351,17 @@ fn elf_has_virtual_address_mapping() {
         .collect();
     assert!(values.contains(&("do_work".to_string(), builders::KALLSYMS_BASE + 0x100)));
 }
+
+#[test]
+fn generate_uses_image_when_kernel_file_is_absent() {
+    let dir = temp_dir::temp_dir();
+    let image = dir.join("boot.img");
+    fs::write(&image, builders::ikconfig_gzip()).expect("image written");
+    let out = dir.join("boot");
+
+    generate(&image, &out, "boot").expect("generation must succeed");
+    assert_eq!(
+        fs::read(out.join("ikconfig")).unwrap(),
+        builders::KERNEL_CONFIG
+    );
+}

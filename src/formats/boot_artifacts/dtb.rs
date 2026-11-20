@@ -1,3 +1,5 @@
+//! Flattened Device Tree helpers: split concatenated DTB blobs and render DTS.
+
 use anyhow::{Result, bail};
 use dtoolkit::fdt::Fdt;
 
@@ -9,6 +11,11 @@ const FDT_HEADER_SIZE: usize = 40;
 
 /// Split a blob containing one or more concatenated FDT blobs into the
 /// individual blobs. Zero-copy: every returned slice points into `data`.
+///
+/// # Errors
+///
+/// Returns an error when an FDT header declares an invalid or truncated
+/// `totalsize`.
 ///
 /// Junk before/between blobs is skipped in 4-byte steps (FDTs are aligned),
 /// which is what `extract-dtb` effectively does when scanning an image.
@@ -153,6 +160,10 @@ fn validate_fdt(data: &[u8]) -> Result<()> {
 
 /// Render one FDT blob as DTS source text, equivalent to
 /// `dtc -I dtb -O dts`.
+///
+/// # Errors
+///
+/// Returns an error when the FDT structure block is invalid.
 pub fn dtb_to_dts(data: &[u8]) -> Result<String> {
     validate_fdt(data)?;
     // SAFETY by inspection: `validate_fdt` walks the whole structure block,

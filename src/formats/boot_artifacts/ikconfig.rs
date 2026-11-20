@@ -1,3 +1,5 @@
+//! Extraction of the kernel `.config` embedded via `CONFIG_IKCONFIG`.
+
 use anyhow::Result;
 use std::io::Read;
 

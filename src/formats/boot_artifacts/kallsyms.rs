@@ -1,3 +1,5 @@
+//! Recovery of the compressed kernel symbol table (`kallsyms`) from a raw kernel image.
+
 use anyhow::{Result, bail};
 use std::borrow::Cow;
 use std::io::Read;
@@ -83,21 +85,25 @@ pub fn render_kallsyms(symbols: &[Symbol]) -> String {
     out
 }
 
-fn find_subslice_all(data: &[u8], needle: &[u8]) -> Vec<usize> {
-    let mut result = Vec::new();
+/// Find every non-overlapping occurrence of `needle` in `data`.
+///
+/// Uses SIMD-accelerated substring search from `memchr` and yields offsets
+/// lazily into the caller's vector, avoiding a second scan per match.
+pub fn find_all_offsets(data: &[u8], needle: &[u8]) -> Vec<usize> {
     if needle.is_empty() || needle.len() > data.len() {
-        return result;
+        return Vec::new();
     }
-    let mut position = 0usize;
-    while let Some(found) = data[position..]
-        .windows(needle.len())
-        .position(|window| window == needle)
-    {
-        let at = position + found;
-        result.push(at);
-        position = at + 1;
+    memchr::memmem::find_iter(data, needle).collect()
+}
+
+/// Interpret a raw 32-bit word as a two's-complement `i32` in the given
+/// byte order. Used for `kallsyms_offsets`, which are signed `.long` values.
+pub fn offset_i32(raw: u32, big_endian: bool) -> i32 {
+    if big_endian {
+        i32::from_be_bytes(raw.to_be_bytes())
+    } else {
+        i32::from_le_bytes(raw.to_le_bytes())
     }
-    result
 }
 
 /// Locate `kallsyms_token_table`: 256 NUL-terminated fragments, where the
@@ -106,7 +112,7 @@ fn find_token_table(kernel: &[u8]) -> Result<(usize, Vec<Vec<u8>>)> {
     let needle: Vec<u8> = (b'0'..=b'9').flat_map(|digit| [digit, 0]).collect();
     let mut candidates = Vec::new();
     let mut preferred = Vec::new();
-    for position in find_subslice_all(kernel, &needle) {
+    for position in find_all_offsets(kernel, &needle) {
         let after = position + needle.len();
         let tail = kernel.get(after..).unwrap_or_default();
         if [
@@ -142,7 +148,7 @@ fn find_token_table(kernel: &[u8]) -> Result<(usize, Vec<Vec<u8>>)> {
         bail!("digit sequence is not part of a kallsyms token table");
     }
     start -= 1;
-    for tokens_backwards in 0..(b'0' as usize) {
+    for _ in 0..(b'0' as usize) {
         let mut chars = 0usize;
         loop {
             if start == 0 {
@@ -158,7 +164,6 @@ fn find_token_table(kernel: &[u8]) -> Result<(usize, Vec<Vec<u8>>)> {
                 bail!("not a kallsyms token table");
             }
         }
-        let _ = tokens_backwards;
     }
     start += 1;
     start = start.div_ceil(4) * 4;
@@ -199,8 +204,8 @@ fn find_token_index(
         le.extend_from_slice(&offset.to_le_bytes());
         be.extend_from_slice(&offset.to_be_bytes());
     }
-    let le_pos = find_subslice_all(area, &le).into_iter().next_back();
-    let be_pos = find_subslice_all(area, &be).into_iter().next_back();
+    let le_pos = find_all_offsets(area, &le).into_iter().next_back();
+    let be_pos = find_all_offsets(area, &be).into_iter().next_back();
     match (le_pos, be_pos) {
         (Some(l), Some(b)) if b > l => Ok((position + b, Endian::Big)),
         (Some(l), _) => Ok((position + l, Endian::Little)),
@@ -525,7 +530,9 @@ fn find_relative_addresses(
         let offsets: Result<Vec<i32>> = (0..count)
             .map(|index| {
                 let raw = read_uint(kernel, start + index * offset_size, offset_size, endian)?;
-                Ok(raw as i32)
+                let raw = u32::try_from(raw)
+                    .map_err(|_| anyhow::anyhow!("kallsyms offset out of range"))?;
+                Ok(offset_i32(raw, endian == Endian::Big))
             })
             .collect();
         let Ok(offsets) = offsets else {

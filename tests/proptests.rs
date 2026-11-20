@@ -79,3 +79,41 @@ proptest! {
         prop_assert_eq!(actual, expected);
     }
 }
+
+proptest! {
+    #[test]
+    fn find_all_offsets_matches_reference(
+        data in prop::collection::vec(0u8..=255, 0..512),
+        needle in prop::collection::vec(1u8..=255, 1..8),
+    ) {
+        let mut reference = Vec::new();
+        let mut position = 0usize;
+        if !needle.is_empty() && needle.len() <= data.len() {
+            while let Some(found) = data[position..]
+                .windows(needle.len())
+                .position(|window| window == needle)
+            {
+                let at = position + found;
+                reference.push(at);
+                position = at + 1;
+            }
+        }
+        prop_assert_eq!(
+            dumprs::formats::boot_artifacts::kallsyms::find_all_offsets(&data, &needle),
+            reference
+        );
+    }
+
+    #[test]
+    fn offset_i32_is_twos_complement(raw in any::<u32>(), big_endian in any::<bool>()) {
+        let expected = if big_endian {
+            i32::from_be_bytes(raw.to_be_bytes())
+        } else {
+            i32::from_le_bytes(raw.to_le_bytes())
+        };
+        prop_assert_eq!(
+            dumprs::formats::boot_artifacts::kallsyms::offset_i32(raw, big_endian),
+            expected
+        );
+    }
+}
