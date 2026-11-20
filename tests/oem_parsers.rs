@@ -14,6 +14,7 @@ use dumprs::formats::oem::ops::extract_ops;
 use dumprs::formats::oem::ozip::decrypt_ozip;
 use dumprs::formats::oem::pac::extract_pac;
 use dumprs::formats::oem::qfil::extract_qfil;
+use dumprs::formats::oem::rockchip::{extract_rockchip_update, rkcrc};
 use dumprs::formats::oem::ruu::decrypt_ruu_zip;
 use dumprs::formats::oem::update_app::extract_update_app;
 use dumprs::steps::extract_archive::unpack_archive;
@@ -842,6 +843,130 @@ fn unpack_archive_decrypts_ruu_zip() {
     assert_eq!(
         fs::read(dest.join("boot.img")).expect("boot.img"),
         b"HTC-BOOT"
+    );
+}
+
+fn c_field(value: &[u8], len: usize) -> Vec<u8> {
+    let mut field = vec![0u8; len];
+    field[..value.len().min(len)].copy_from_slice(&value[..value.len().min(len)]);
+    field
+}
+
+fn rockchip_update_image() -> Vec<u8> {
+    let param_text = b"FIRMWARE_VER:8.1\nMACHINE_MODEL:rk3399\n";
+    let mut param = b"PARM".to_vec();
+    param.extend_from_slice(&(param_text.len() as u32).to_le_bytes());
+    param.extend_from_slice(param_text);
+    param.extend_from_slice(&rkcrc(param_text).to_le_bytes());
+    let kernel = b"KERNELPAYLOAD".repeat(40);
+
+    let mut header = Vec::with_capacity(0x800);
+    header.extend_from_slice(b"RKAF");
+    header.extend_from_slice(&0u32.to_le_bytes());
+    header.extend_from_slice(&c_field(b"rk3399", 34));
+    header.extend_from_slice(&c_field(b"007", 30));
+    header.extend_from_slice(&c_field(b"rockchip", 56));
+    header.extend_from_slice(&0u32.to_le_bytes());
+    header.extend_from_slice(&0x0801_0000u32.to_le_bytes());
+    header.extend_from_slice(&2u32.to_le_bytes());
+
+    let part = |name: &[u8], path: &[u8], offset: usize, data: &[u8]| -> Vec<u8> {
+        let mut record = c_field(name, 32);
+        record.extend_from_slice(&c_field(path, 60));
+        record.extend_from_slice(&0u32.to_le_bytes());
+        record.extend_from_slice(&(offset as u32).to_le_bytes());
+        record.extend_from_slice(&0u32.to_le_bytes());
+        record.extend_from_slice(&((data.len().div_ceil(512) * 512) as u32).to_le_bytes());
+        record.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        record
+    };
+    let p1 = 0x800;
+    let p2 = p1 + param.len();
+    header.extend_from_slice(&part(b"parameter", b"parameter", p1, &param));
+    header.extend_from_slice(&part(b"kernel", b"Image/kernel.img", p2, &kernel));
+    header.resize(0x800, 0);
+
+    let mut image = header;
+    image.extend_from_slice(&param);
+    image.extend_from_slice(&kernel);
+    image.extend_from_slice(&rkcrc(&image).to_le_bytes());
+    let declared = (image.len() - 4) as u32;
+    image[4..8].copy_from_slice(&declared.to_le_bytes());
+    let crc_len = image.len() - 4;
+    let crc = rkcrc(&image[..crc_len]);
+    image[crc_len..].copy_from_slice(&crc.to_le_bytes());
+    image
+}
+
+/// Regression: a Rockchip update.img stores each partition's payload at its
+/// own absolute offset and validates the whole image with RKCRC.
+#[test]
+fn extracts_rockchip_update_image() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    let source = root.join("update.img");
+    fs::write(&source, rockchip_update_image()).expect("update.img written");
+
+    extract_rockchip_update(&source, &out).expect("update.img extracted");
+
+    assert_eq!(
+        fs::read(out.join("Image/kernel.img")).expect("kernel"),
+        b"KERNELPAYLOAD".repeat(40)
+    );
+    assert!(out.join("parameter").is_file());
+}
+
+/// Regression: a standalone Rockchip update.img must be routed to its parser.
+#[test]
+fn prepare_oem_containers_extracts_rockchip() {
+    let root = temp_dir::temp_dir();
+    let extracted = root.join("extracted");
+    let raw = root.join("raw");
+    fs::create_dir_all(&extracted).expect("extracted dir created");
+    fs::create_dir_all(&raw).expect("raw dir created");
+    fs::write(extracted.join("update.img"), rockchip_update_image()).expect("image written");
+
+    prepare_oem_containers(&extracted, &raw).expect("Rockchip image extracted");
+
+    assert_eq!(
+        fs::read(raw.join("Image/kernel.img")).expect("kernel"),
+        b"KERNELPAYLOAD".repeat(40)
+    );
+}
+
+/// Differential check against DumprX's `afptool -unpack` binary.
+#[test]
+#[ignore = "requires the DumprX afptool binary"]
+fn matches_afptool_rockchip_oracle() {
+    let Some(tool) = dumpyara_tool("bin/afptool") else {
+        println!("check did not run: afptool is missing");
+        return;
+    };
+    let root = temp_dir::temp_dir();
+    let image = rockchip_update_image();
+    let source = root.join("update.img");
+    fs::write(&source, &image).expect("update.img written");
+    let rust_out = root.join("rust");
+    let tool_out = root.join("tool");
+    fs::create_dir_all(&rust_out).expect("rust dir created");
+    fs::create_dir_all(&tool_out).expect("tool dir created");
+
+    extract_rockchip_update(&source, &rust_out).expect("rust extraction succeeded");
+    let status = std::process::Command::new(tool)
+        .arg("-unpack")
+        .arg(&source)
+        .arg(&tool_out)
+        .output()
+        .expect("afptool invoked");
+    assert!(status.status.success(), "afptool failed");
+    assert_eq!(
+        fs::read(rust_out.join("Image/kernel.img")).expect("rust image"),
+        fs::read(tool_out.join("Image/kernel.img")).expect("tool image")
+    );
+    assert_eq!(
+        fs::read(rust_out.join("parameter")).expect("rust parameter"),
+        fs::read(tool_out.join("parameter")).expect("tool parameter")
     );
 }
 

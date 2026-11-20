@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
@@ -12,6 +13,7 @@ use crate::formats::oem::ofp_qc::extract_ofp_qc;
 use crate::formats::oem::ops::extract_ops;
 use crate::formats::oem::pac::extract_pac;
 use crate::formats::oem::qfil::{extract_qfil, list_targets};
+use crate::formats::oem::rockchip::extract_rockchip_update;
 use crate::formats::oem::update_app::extract_update_app;
 use crate::utils::firmware::{FirmwareKind, detect_firmware_kind};
 
@@ -37,7 +39,11 @@ pub fn prepare_oem_containers(extracted: &Path, raw_images: &Path) -> Result<()>
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let kind = detect_firmware_kind(&[], name, &[] as &[String]);
+        let mut head = [0u8; 8];
+        if let Ok(mut file) = std::fs::File::open(&path) {
+            let _ = file.read(&mut head);
+        }
+        let kind = detect_firmware_kind(&head, name, &[] as &[String]);
         if kind == FirmwareKind::HuaweiUpdateApp {
             info!(file = name, "oem.container.detected");
             extract_update_app(&path, raw_images)?;
@@ -56,6 +62,10 @@ pub fn prepare_oem_containers(extracted: &Path, raw_images: &Path) -> Result<()>
             } else {
                 info!(file = name, variant = "qc", "oem.container.detected");
             }
+            let _ = fs::remove_file(&path);
+        } else if kind == FirmwareKind::Rockchip {
+            info!(file = name, "oem.container.detected");
+            extract_rockchip_update(&path, raw_images)?;
             let _ = fs::remove_file(&path);
         } else if kind == FirmwareKind::Ruu {
             warn!(

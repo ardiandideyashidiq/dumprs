@@ -49,6 +49,12 @@ the following work:
 
 ## OEM containers
 
+- The Rockchip `update.img` layout in `src/formats/oem/rockchip.rs` and the
+  RKCRC table in `rockchip_crc.rs` follow `rkafp.h`/`rkcrc.h` from
+  [liftoff-sr/rockchip-tool](https://github.com/liftoff-sr/rockchip-tool)
+  (GPL-3.0); both are reimplemented in Rust, not copied. The `rkImageMaker`
+  loader wrapper is not implemented — extract `firmware.img` first.
+
 - [ruuveal](https://github.com/kmdm/ruuveal) by Kenny Millington
   (GPL-3.0-or-later) for the HTC `rom.zip` header, device key table and
   chunked AES-CBC layout. The compiled-in `keydata`/`keymap` tables are from

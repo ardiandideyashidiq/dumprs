@@ -106,6 +106,9 @@ pub fn detect_firmware_kind(head: &[u8], filename: &str, members: &[String]) -> 
     if name.starts_with("ruu_") && name.ends_with(".exe") {
         return FirmwareKind::Ruu;
     }
+    if head.starts_with(b"RKAF") {
+        return FirmwareKind::Rockchip;
+    }
     if name.contains("aml") || members_match(&lowered, |m| base(m).contains("aml")) {
         return FirmwareKind::Amlogic;
     }
@@ -730,6 +733,12 @@ mod tests {
                 "aml_upgrade_package.img",
                 &[] as &[&str],
                 FirmwareKind::Amlogic,
+            ),
+            (
+                b"RKAF",
+                "update.img",
+                &[] as &[&str],
+                FirmwareKind::Rockchip,
             ),
             (
                 b"",
