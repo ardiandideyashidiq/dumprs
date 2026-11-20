@@ -10,6 +10,7 @@ use walkdir::WalkDir;
 use crate::steps::extract_archive::extract_archive;
 use crate::steps::extract_images::extract_images_with_cleanup;
 use crate::steps::prepare_images::prepare_images;
+use crate::utils::bloat_cleanup::{CleanupConfig, cleanup_bloat, cleanup_enabled};
 use crate::utils::device_info::DeviceInfo;
 use crate::utils::dump_metadata::{
     generate_board_info, preserve_auxiliary_files, write_all_files_list,
@@ -25,6 +26,8 @@ pub struct DumpOptions {
     pub resume: bool,
     /// Skip the boot/kernel artifact generators (AVB, IKconfig, DTB/DTS).
     pub skip_boot_artifacts: bool,
+    /// Skip DumprX-compatible bloatware cleanup before finalizing.
+    pub skip_bloat_cleanup: bool,
     pub partitions: Vec<String>,
     /// Emit `fs_config` and `file_contexts` sidecars for extracted partitions.
     pub fs_metadata: Option<crate::utils::fs_metadata::FsMetadataOptions>,
@@ -228,6 +231,17 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
         },
     );
     write_all_files_list(output_path, &mut files_list)?;
+
+    // DumprX runs this immediately before push; do it after the first manifest
+    // so the regenerated manifest keeps the self-reference sentinel.
+    let enabled = !options.skip_bloat_cleanup
+        && cleanup_enabled(
+            std::env::var("CLEANUP_BLOAT").ok().as_deref(),
+            std::env::var("CLEANUP_GAPPS").ok().as_deref(),
+        );
+    if enabled && let Err(error) = cleanup_bloat(output_path, &CleanupConfig { enabled: true }) {
+        tracing::warn!(error = %error, "bloat.cleanup_failed");
+    }
     info!(
         step = 4,
         duration = %HumanDuration(finalize_start.elapsed()),

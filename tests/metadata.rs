@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[test]
-fn all_files_manifest_is_sorted_and_excludes_itself() {
+fn all_files_manifest_is_sorted_and_contains_itself() {
     let root = temp_dir::temp_dir();
     let mut files = vec![
         PathBuf::from("vendor/build.prop"),

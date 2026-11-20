@@ -1,3 +1,4 @@
+pub mod bloat_cleanup;
 pub mod device_info;
 pub mod dump_metadata;
 pub mod files;

@@ -43,8 +43,21 @@ fn partition_catalog_contains_dumprx_only_names() {
 #[test]
 fn ext4_partition_list_matches_dumprx() {
     let expected: &[&str] = &[
-        "system", "vendor", "cust", "odm", "oem", "factory", "product", "xrom", "systemex",
-        "oppo_product", "preload_common", "hw_product", "product_h", "preas", "preavs",
+        "system",
+        "vendor",
+        "cust",
+        "odm",
+        "oem",
+        "factory",
+        "product",
+        "xrom",
+        "systemex",
+        "oppo_product",
+        "preload_common",
+        "hw_product",
+        "product_h",
+        "preas",
+        "preavs",
     ];
     assert_eq!(dumprs::utils::partitions::EXT4_PARTITIONS, expected);
     assert!(!dumprs::utils::partitions::EXT4_PARTITIONS.contains(&"modem"));

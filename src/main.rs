@@ -45,6 +45,10 @@ struct Args {
     #[arg(long)]
     skip_boot_artifacts: bool,
 
+    /// Skip DumprX-compatible bloatware cleanup before finalizing
+    #[arg(long)]
+    skip_bloat_cleanup: bool,
+
     /// Extract only specified partition(s) (e.g. -p system -p vendor)
     #[arg(short, long, value_name = "PARTITION")]
     partition: Vec<String>,
@@ -157,6 +161,7 @@ fn main() -> Result<()> {
         skip_prepare: args.skip_prepare,
         resume: args.resume,
         skip_boot_artifacts: args.skip_boot_artifacts,
+        skip_bloat_cleanup: args.skip_bloat_cleanup,
         partitions: args.partition,
         fs_metadata,
     };
