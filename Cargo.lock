@@ -384,6 +384,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfb-mode"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac64b0984be8510caae81455ea2c8c23e5af6be61c36129df62f3380d5d64e1f"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -902,6 +911,7 @@ dependencies = [
  "brotli",
  "byteorder",
  "bzip2 0.4.4",
+ "cfb-mode",
  "clap",
  "crc32fast",
  "criterion",
@@ -914,6 +924,7 @@ dependencies = [
  "lz4_flex 0.11.6",
  "lzma-rs",
  "lzo",
+ "md-5",
  "memchr",
  "memmap2",
  "object",
@@ -1388,6 +1399,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
+]
+
+[[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest 0.11.3",
 ]
 
 [[package]]

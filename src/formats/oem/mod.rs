@@ -2,6 +2,7 @@
 
 pub mod amlogic;
 pub mod nb0;
+pub mod ofp_mtk;
 pub mod ozip;
 pub mod pac;
 pub mod qfil;

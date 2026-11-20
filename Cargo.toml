@@ -42,6 +42,8 @@ rust-fs-erofs = "0.6"
 roxmltree = "0.21"
 aes = "0.9"
 ecb = "0.2"
+cfb-mode = "0.9"
+md-5 = "0.11"
 
 [build-dependencies]
 prost = "0.13"

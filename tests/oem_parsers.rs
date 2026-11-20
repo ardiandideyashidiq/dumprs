@@ -8,6 +8,7 @@ mod temp_dir;
 
 use dumprs::formats::oem::amlogic::extract_amlogic;
 use dumprs::formats::oem::nb0::extract_nb0;
+use dumprs::formats::oem::ofp_mtk::extract_ofp_mtk;
 use dumprs::formats::oem::ozip::decrypt_ozip;
 use dumprs::formats::oem::pac::extract_pac;
 use dumprs::formats::oem::qfil::extract_qfil;
@@ -543,6 +544,100 @@ fn parse_hex_key(value: &str) -> [u8; 16] {
         *byte = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).expect("hex key");
     }
     key
+}
+
+const OFP_MTK_KEYTEST: &[u8] = &[
+    0x9b, 0x1f, 0xdd, 0x88, 0x04, 0x9d, 0xb4, 0x58, 0xc2, 0x4d, 0x3f, 0xd7, 0x68, 0xb5, 0x38, 0x18,
+];
+const OFP_MTK_HEADER_KEY: &[u8] = b"geyixue";
+
+fn nibble_swap(byte: u8) -> u8 {
+    ((byte & 0xf0) >> 4) | ((byte & 0x0f) << 4)
+}
+
+/// Write header bytes in the form the parser expects after applying its
+/// `geyixue` shuffle. The shuffle is undone by swapping the nibbles of
+/// `key ^ desired`.
+fn mtk_encode_header(key: &[u8], desired: &[u8]) -> Vec<u8> {
+    desired
+        .iter()
+        .enumerate()
+        .map(|(i, &byte)| nibble_swap(key[i % key.len()] ^ byte))
+        .collect()
+}
+
+/// Regression: an MTK OFP keeps its last 0x6C bytes as a shuffled header and
+/// the preceding 0x60-byte entries; encrypted entry prefixes are AES-CFB with
+/// an MD5-derived key, while the remainder is copied verbatim.
+#[test]
+fn extracts_mtk_ofp_firmware() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+
+    let mut header = vec![0u8; 0x6c];
+    header[..8].copy_from_slice(b"PROJECT\0");
+    header[72..74].copy_from_slice(&1u16.to_le_bytes());
+    let header = mtk_encode_header(OFP_MTK_HEADER_KEY, &header);
+
+    let mut entry = vec![0u8; 0x60];
+    entry[..6].copy_from_slice(b"system");
+    entry[32..40].copy_from_slice(&0x1000u64.to_le_bytes());
+    entry[40..48].copy_from_slice(&32u64.to_le_bytes());
+    entry[48..56].copy_from_slice(&16u64.to_le_bytes());
+    entry[56..66].copy_from_slice(b"system.img");
+    let entry = mtk_encode_header(OFP_MTK_HEADER_KEY, &entry);
+
+    let mut image = vec![0u8; 0x1000];
+    image[..16].copy_from_slice(OFP_MTK_KEYTEST);
+    image.extend_from_slice(OFP_MTK_KEYTEST);
+    image.extend_from_slice(&[b'R'; 16]);
+    image.extend_from_slice(&entry);
+    image.extend_from_slice(&header);
+    let path = root.join("firmware.ofp");
+    fs::write(&path, image).expect("ofp written");
+
+    extract_ofp_mtk(&path, &out).expect("MTK OFP extracted");
+
+    let mut expected = b"MMMTEST012345678".to_vec();
+    expected.extend_from_slice(&[b'R'; 16]);
+    assert_eq!(
+        fs::read(out.join("system.img")).expect("system.img"),
+        expected
+    );
+}
+
+/// Regression: a standalone `.ofp` must be routed to the OFP decryptor
+/// rather than left for the generic firmware pass.
+#[test]
+fn prepare_oem_containers_extracts_mtk_ofp() {
+    let root = temp_dir::temp_dir();
+    let extracted = root.join("extracted");
+    let raw = root.join("raw");
+    fs::create_dir_all(&extracted).expect("extracted dir created");
+    fs::create_dir_all(&raw).expect("raw dir created");
+
+    let mut header = vec![0u8; 0x6c];
+    header[72..74].copy_from_slice(&1u16.to_le_bytes());
+    let header = mtk_encode_header(OFP_MTK_HEADER_KEY, &header);
+    let mut entry = vec![0u8; 0x60];
+    entry[32..40].copy_from_slice(&0x1000u64.to_le_bytes());
+    entry[40..48].copy_from_slice(&32u64.to_le_bytes());
+    entry[48..56].copy_from_slice(&16u64.to_le_bytes());
+    entry[56..66].copy_from_slice(b"system.img");
+    let entry = mtk_encode_header(OFP_MTK_HEADER_KEY, &entry);
+
+    let mut image = vec![0u8; 0x1000];
+    image[..16].copy_from_slice(OFP_MTK_KEYTEST);
+    image.extend_from_slice(OFP_MTK_KEYTEST);
+    image.extend_from_slice(&[b'R'; 16]);
+    image.extend_from_slice(&entry);
+    image.extend_from_slice(&header);
+    fs::write(extracted.join("firmware.ofp"), image).expect("ofp written");
+
+    prepare_oem_containers(&extracted, &raw).expect("OFP extracted");
+
+    assert!(raw.join("system.img").is_file());
 }
 
 /// Side-by-side differential check against the tool this port replaces.

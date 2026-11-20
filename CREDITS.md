@@ -49,6 +49,10 @@ the following work:
 
 ## OEM containers
 
+- `ofp_mtk_decrypt.py` by [bkerler](https://github.com/bkerler/oppo_decrypt)
+  (MIT) for the MediaTek OFP header shuffle and key table.
+- `cfb-mode` (MIT OR Apache-2.0) and `md-5` (MIT OR Apache-2.0) from RustCrypto
+  for pure-Rust AES-CFB and key derivation.
 - `ozipdecrypt.py` by [bkerler](https://github.com/bkerler/oppo_ozip_decrypt)
   (MIT) for the `.ozip` AES-128-ECB layout and published key list.
 - [aes](https://github.com/RustCrypto/block-ciphers) and
