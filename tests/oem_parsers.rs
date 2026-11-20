@@ -16,6 +16,7 @@ use dumprs::formats::oem::pac::extract_pac;
 use dumprs::formats::oem::qfil::extract_qfil;
 use dumprs::formats::oem::rockchip::{extract_rockchip_update, rkcrc};
 use dumprs::formats::oem::ruu::decrypt_ruu_zip;
+use dumprs::formats::oem::sony_sin::extract_sin;
 use dumprs::formats::oem::update_app::extract_update_app;
 use dumprs::steps::extract_archive::unpack_archive;
 use dumprs::steps::oem::prepare_oem_containers;
@@ -896,6 +897,118 @@ fn rockchip_update_image() -> Vec<u8> {
     let crc = rkcrc(&image[..crc_len]);
     image[crc_len..].copy_from_slice(&crc.to_le_bytes());
     image
+}
+
+fn sin_file(block: &[u8], payload: &[u8]) -> Vec<u8> {
+    let header_len = 0x18 + 0x100;
+    let mut sin = vec![0u8; header_len];
+    sin[0] = 3;
+    sin[1..4].copy_from_slice(b"SIN");
+    sin[4..8].copy_from_slice(&(header_len as u32).to_be_bytes());
+    sin[8..12].copy_from_slice(&0x27u32.to_be_bytes());
+    sin[0x14..0x18].copy_from_slice(&0u32.to_be_bytes());
+
+    let mut data_header = Vec::new();
+    data_header.extend_from_slice(b"MMCF");
+    data_header.extend_from_slice(&0u32.to_be_bytes());
+    data_header.extend_from_slice(b"GPTP");
+    data_header.extend_from_slice(&0x18u32.to_be_bytes());
+    data_header.extend_from_slice(&[0u8; 16]);
+    debug_assert_eq!(data_header.len(), 0x20);
+
+    let payload_at = (header_len + data_header.len() + block.len()) as u64;
+    let mut block = block.to_vec();
+    block[8..16].copy_from_slice(&payload_at.to_be_bytes());
+    let mut image = sin;
+    image.extend_from_slice(&data_header);
+    image.extend_from_slice(&block);
+    image.extend_from_slice(payload);
+    image
+}
+
+fn addr_block(payload_len: usize, dest: u64) -> Vec<u8> {
+    let mut block = vec![0u8; 0x44];
+    block[..4].copy_from_slice(b"ADDR");
+    block[4..8].copy_from_slice(&0x44u32.to_be_bytes());
+    block[16..24].copy_from_slice(&(payload_len as u64).to_be_bytes());
+    block[24..32].copy_from_slice(&dest.to_be_bytes());
+    block
+}
+
+/// Regression: SIN ADDR blocks carry verbatim data and write it at the
+/// declared destination; bytes before that destination are 0xFF padding.
+#[test]
+fn extracts_sin_addr_block() {
+    let root = temp_dir::temp_dir();
+    let payload = b"SIN-PAYLOAD";
+    let source = root.join("system.sin");
+    let output = root.join("system.img");
+    fs::write(&source, sin_file(&addr_block(payload.len(), 4), payload)).expect("sin written");
+
+    extract_sin(&source, &output).expect("sin extracted");
+
+    let mut expected = vec![0xff; 4];
+    expected.extend_from_slice(payload);
+    assert_eq!(fs::read(&output).expect("image"), expected);
+}
+
+/// Regression: SIN LZ4A blocks are raw LZ4 payloads decoded to `dest_length`.
+#[test]
+fn extracts_sin_lz4a_block() {
+    let root = temp_dir::temp_dir();
+    let payload = b"COMPRESSED-SIN-PAYLOAD-1234567890";
+    let compressed = lz4_flex::block::compress(payload);
+    let mut block = vec![0u8; 0x54];
+    block[..4].copy_from_slice(b"LZ4A");
+    block[4..8].copy_from_slice(&0x54u32.to_be_bytes());
+    block[16..24].copy_from_slice(&(compressed.len() as u64).to_be_bytes());
+    block[24..32].copy_from_slice(&(compressed.len() as u64).to_be_bytes());
+    block[32..40].copy_from_slice(&0u64.to_be_bytes());
+    block[40..48].copy_from_slice(&(payload.len() as u64).to_be_bytes());
+    let source = root.join("system.sin");
+    let output = root.join("system.img");
+    fs::write(&source, sin_file(&block, &compressed)).expect("sin written");
+
+    extract_sin(&source, &output).expect("sin extracted");
+
+    assert_eq!(fs::read(&output).expect("image"), payload);
+}
+
+/// Regression: an unsupported SIN version must be rejected rather than
+/// interpreted with a wrong header layout.
+#[test]
+fn rejects_unsupported_sin_version() {
+    let root = temp_dir::temp_dir();
+    let source = root.join("system.sin");
+    let output = root.join("system.img");
+    let mut image = sin_file(&addr_block(4, 0), b"TEST");
+    image[0] = 4;
+    fs::write(&source, image).expect("sin written");
+
+    assert!(extract_sin(&source, &output).is_err());
+}
+
+/// Regression: a standalone `.sin` must be routed to its parser and written
+/// as the canonical `.img` name for the later partition passes.
+#[test]
+fn prepare_oem_containers_extracts_sin() {
+    let root = temp_dir::temp_dir();
+    let extracted = root.join("extracted");
+    let raw = root.join("raw");
+    fs::create_dir_all(&extracted).expect("extracted dir created");
+    fs::create_dir_all(&raw).expect("raw dir created");
+    fs::write(
+        extracted.join("system.sin"),
+        sin_file(&addr_block(4, 0), b"TEST"),
+    )
+    .expect("sin written");
+
+    prepare_oem_containers(&extracted, &raw).expect("sin extracted");
+
+    assert_eq!(
+        fs::read(raw.join("system.img")).expect("system.img"),
+        b"TEST"
+    );
 }
 
 /// Regression: a Rockchip update.img stores each partition's payload at its

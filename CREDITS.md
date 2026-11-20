@@ -49,6 +49,11 @@ the following work:
 
 ## OEM containers
 
+- The Sony `.sin` ADDR/LZ4A block layout in `src/formats/oem/sony_sin.rs`
+  follows the [SIN structure analysis](https://gist.github.com/dosomder/8ed79b26a5e063efa5ef)
+  by zxz0O0, credited there to Androxyde. Tests are specification-based unit
+  tests because `unsin` has no packing mode and no `.sin` sample is available.
+
 - The Rockchip `update.img` layout in `src/formats/oem/rockchip.rs` and the
   RKCRC table in `rockchip_crc.rs` follow `rkafp.h`/`rkcrc.h` from
   [liftoff-sr/rockchip-tool](https://github.com/liftoff-sr/rockchip-tool)

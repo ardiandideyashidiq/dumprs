@@ -14,6 +14,7 @@ use crate::formats::oem::ops::extract_ops;
 use crate::formats::oem::pac::extract_pac;
 use crate::formats::oem::qfil::{extract_qfil, list_targets};
 use crate::formats::oem::rockchip::extract_rockchip_update;
+use crate::formats::oem::sony_sin::extract_sin;
 use crate::formats::oem::update_app::extract_update_app;
 use crate::utils::firmware::{FirmwareKind, detect_firmware_kind};
 
@@ -62,6 +63,15 @@ pub fn prepare_oem_containers(extracted: &Path, raw_images: &Path) -> Result<()>
             } else {
                 info!(file = name, variant = "qc", "oem.container.detected");
             }
+            let _ = fs::remove_file(&path);
+        } else if kind == FirmwareKind::SonySin {
+            info!(file = name, "oem.container.detected");
+            let stem = Path::new(name)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(name);
+            let output = raw_images.join(format!("{stem}.img"));
+            extract_sin(&path, &output)?;
             let _ = fs::remove_file(&path);
         } else if kind == FirmwareKind::Rockchip {
             info!(file = name, "oem.container.detected");

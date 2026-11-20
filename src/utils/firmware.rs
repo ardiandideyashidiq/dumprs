@@ -123,7 +123,7 @@ pub fn detect_firmware_kind(head: &[u8], filename: &str, members: &[String]) -> 
     if name.ends_with(".nb0") || members_match(&lowered, |m| base(m).ends_with(".nb0")) {
         return FirmwareKind::Nb0;
     }
-    if members_match(&lowered, |m| base(m).ends_with(".sin")) {
+    if name.ends_with(".sin") || members_match(&lowered, |m| base(m).ends_with(".sin")) {
         return FirmwareKind::SonySin;
     }
     if name.ends_with(".pac") || members_match(&lowered, |m| base(m).ends_with(".pac")) {
@@ -749,6 +749,7 @@ mod tests {
             (b"", "fw.zip", &["system.nb0"], FirmwareKind::Nb0),
             (b"", "firmware.nb0", &[] as &[&str], FirmwareKind::Nb0),
             (b"", "fw.zip", &["system.sin"], FirmwareKind::SonySin),
+            (b"", "system.sin", &[] as &[&str], FirmwareKind::SonySin),
             // dumper.sh checks `super.img` before the rockchip branch.
             (
                 b"",

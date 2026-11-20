@@ -10,4 +10,5 @@ pub mod pac;
 pub mod qfil;
 pub mod rockchip;
 pub mod ruu;
+pub mod sony_sin;
 pub mod update_app;
