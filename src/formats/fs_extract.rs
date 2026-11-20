@@ -20,6 +20,8 @@ use tracing::{debug, info};
 use std::os::unix::fs::PermissionsExt;
 
 use crate::utils::files::resolve_image_mmap;
+#[cfg(unix)]
+use crate::utils::files::{create_dir_with_mode, create_file_with_mode};
 use crate::utils::progress::ByteProgress;
 
 /// Filesystem extraction backends, in the order dumprs attempts them.
@@ -396,12 +398,13 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
         let target = output_dir.join(rel_path);
 
         if entry.inode.is_dir() {
-            if fs::create_dir(&target).is_err() {
-                fs::create_dir_all(&target)?;
-            }
             #[cfg(unix)]
+            create_dir_with_mode(&target, entry.inode.permissions().mode())?;
+            #[cfg(not(unix))]
             {
-                let _ = fs::set_permissions(&target, entry.inode.permissions());
+                if fs::create_dir(&target).is_err() {
+                    fs::create_dir_all(&target)?;
+                }
             }
             debug!(partition = part_name, dir = rel_path, "erofs.mkdir");
         } else if entry.inode.is_file() {
@@ -430,13 +433,15 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
         .with_min_len(32)
         .try_for_each(|(inode, target)| -> Result<()> {
             let expected_size = inode.data_size() as usize;
+            #[cfg(unix)]
+            let mode = inode.permissions().mode();
             if expected_size == 0 {
+                #[cfg(unix)]
+                create_file_with_mode(&target, mode)
+                    .with_context(|| format!("Failed to create {}", target.display()))?;
+                #[cfg(not(unix))]
                 File::create(&target)
                     .with_context(|| format!("Failed to create {}", target.display()))?;
-                #[cfg(unix)]
-                {
-                    let _ = fs::set_permissions(&target, inode.permissions());
-                }
                 return Ok(());
             }
 
@@ -458,15 +463,27 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
                         }
                         filled += n;
                     }
+                    #[cfg(unix)]
+                    {
+                        let mut out = create_file_with_mode(&target, mode)
+                            .with_context(|| format!("Failed to create {}", target.display()))?;
+                        out.write_all(&copy_buf[..filled])
+                            .with_context(|| format!("Failed to write {}", target.display()))?;
+                    }
+                    #[cfg(not(unix))]
                     fs::write(&target, &copy_buf[..filled])
                         .with_context(|| format!("Failed to write {}", target.display()))?;
                     let file_bytes = filled as u64;
                     bytes_extracted.fetch_add(file_bytes, Ordering::Relaxed);
                     pb.inc(file_bytes);
                 } else {
+                    #[cfg(unix)]
+                    let out_file = create_file_with_mode(&target, mode)
+                        .with_context(|| format!("Failed to create {}", target.display()))?;
+                    #[cfg(not(unix))]
                     let out_file = File::create(&target)
                         .with_context(|| format!("Failed to create {}", target.display()))?;
-                    let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, out_file);
+                    let mut writer = BufWriter::with_capacity(8 * 1024 * 1024, out_file);
                     let mut file_bytes = 0u64;
                     loop {
                         let n = file.read(&mut copy_buf)?;
@@ -479,10 +496,6 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
                     writer.flush()?;
                     bytes_extracted.fetch_add(file_bytes, Ordering::Relaxed);
                     pb.inc(file_bytes);
-                }
-                #[cfg(unix)]
-                {
-                    let _ = fs::set_permissions(&target, inode.permissions());
                 }
                 Ok(())
             })?;

@@ -38,6 +38,39 @@ use crate::utils::progress::ByteProgress;
 
 type SparseChunkGroup = (u64, Vec<(u64, usize, u64)>);
 
+/// Drops the page-cache pages backing one ZIP entry once its decompression is
+/// finished. The compressed data is read exactly once; keeping ~6 GiB of it
+/// resident competes with the anon super image and the extracted output for
+/// memory, which makes the kernel spend time reclaiming instead of writing.
+#[cfg(target_os = "linux")]
+struct ZipPageGuard {
+    base: *const u8,
+    start: usize,
+    end: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ZipPageGuard {
+    fn drop(&mut self) {
+        unsafe extern "C" {
+            fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
+        }
+        const MADV_DONTNEED: i32 = 4;
+        const PAGE_MASK: usize = 4096 - 1;
+        let start = self.start & !PAGE_MASK;
+        let end = (self.end + PAGE_MASK) & !PAGE_MASK;
+        if end > start {
+            unsafe {
+                let _ = madvise(
+                    self.base.add(start).cast_mut().cast(),
+                    end - start,
+                    MADV_DONTNEED,
+                );
+            }
+        }
+    }
+}
+
 fn unpack_tar_stream<R: Read>(
     reader: R,
     dest_dir: &Path,
@@ -190,6 +223,16 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
             .with_context(|| format!("Failed to open {}", archive_path.display()))?;
         let mmap = unsafe { Mmap::map(&file) }
             .with_context(|| format!("Failed to mmap {}", archive_path.display()))?;
+        #[cfg(target_os = "linux")]
+        {
+            unsafe extern "C" {
+                fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
+            }
+            const MADV_SEQUENTIAL: i32 = 2;
+            unsafe {
+                let _ = madvise(mmap.as_ptr().cast_mut().cast(), mmap.len(), MADV_SEQUENTIAL);
+            }
+        }
         let mut zip = zip::ZipArchive::new(Cursor::new(&mmap[..]))
             .with_context(|| format!("Failed to parse zip {}", archive_path.display()))?;
 
@@ -452,6 +495,12 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                     let comp_end = start.saturating_add(comp_size);
                     let compression = raw_entry.compression();
                     drop(raw_entry);
+                    #[cfg(target_os = "linux")]
+                    let _zip_pages = ZipPageGuard {
+                        base: mmap.as_ptr(),
+                        start,
+                        end: comp_end,
+                    };
 
                     debug!(
                         index = i + 1,

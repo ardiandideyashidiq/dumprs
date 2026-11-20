@@ -71,14 +71,23 @@ impl SharedAnonSlice {
     pub fn from_mmap_mut(mmap: &mut memmap2::MmapMut) -> Self {
         let ptr = mmap.as_mut_ptr();
         let len = mmap.len();
+        // Do not force Transparent Huge Pages on this mapping. The sparse super
+        // image is large (virtual sizes of ~13.5 GiB are common while only a
+        // fraction is ever touched) and is populated by many concurrent faulting
+        // writers. With `defrag=defer+madvise`, MADV_HUGEPAGE opts this region
+        // into synchronous direct compaction on every 2 MiB fault, which stalls
+        // the whole pipeline under memory pressure. Opting the region out of
+        // THP entirely trades a little TLB pressure for the removal of both
+        // the synchronous compaction path and later khugepaged promotions,
+        // which would otherwise fault pages back in under writeback pressure.
         #[cfg(target_os = "linux")]
         {
             unsafe extern "C" {
                 fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
             }
-            const MADV_HUGEPAGE: i32 = 14;
+            const MADV_NOHUGEPAGE: i32 = 15;
             unsafe {
-                let _ = madvise(ptr.cast(), len, MADV_HUGEPAGE);
+                let _ = madvise(ptr.cast(), len, MADV_NOHUGEPAGE);
             }
         }
         Self { ptr, len }

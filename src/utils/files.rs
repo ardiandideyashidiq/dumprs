@@ -5,10 +5,83 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::OnceLock;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use walkdir::WalkDir;
 
 use crate::formats::payload::ZIP_SLICE_MAGIC;
+
+/// The process umask, captured once without mutating process state.
+///
+/// On Linux `/proc/self/status` exposes the umask directly, which avoids the
+/// racy `umask(2)` get-and-restore dance when called from worker threads.
+#[cfg(unix)]
+static UMASK: OnceLock<u32> = OnceLock::new();
+
+#[cfg(unix)]
+pub fn current_umask() -> u32 {
+    *UMASK.get_or_init(|| {
+        if let Ok(status) = fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if let Some(value) = line.strip_prefix("Umask:")
+                    && let Ok(mask) = u32::from_str_radix(value.trim(), 8)
+                {
+                    return mask;
+                }
+            }
+        }
+        unsafe extern "C" {
+            fn umask(mask: u32) -> u32;
+        }
+        // Fallback for non-Linux unixes. This runs at most once at startup.
+        unsafe {
+            let mask = umask(0);
+            umask(mask);
+            mask
+        }
+    })
+}
+
+/// Create a file with the archive's mode applied at creation time.
+///
+/// `open(O_CREAT, mode)` already applies `& ~umask` in the kernel, so the extra
+/// `chmod` syscall is only necessary when the umask would strip bits the
+/// archive requires. Avoiding that syscall matters: extracting an Android
+/// firmware creates over ten thousand files, and each separate `chmod` forces
+/// an additional metadata/journal mutation on ext4.
+#[cfg(unix)]
+pub fn create_file_with_mode(path: &Path, mode: u32) -> std::io::Result<File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let effective = mode & !current_umask();
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(effective)
+        .open(path)?;
+    if effective != mode {
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
+    Ok(file)
+}
+
+/// Create a directory with the archive's mode applied at creation time.
+#[cfg(unix)]
+pub fn create_dir_with_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let effective = mode & !current_umask();
+    fs::DirBuilder::new()
+        .mode(effective)
+        .recursive(true)
+        .create(path)?;
+    if effective != mode {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
 
 static BACKING_MMAPS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mmap>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
