@@ -19,6 +19,7 @@ use tracing::{debug, info};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+use crate::utils::bloat_cleanup::{bloat_extract_path, skip_during_extract};
 use crate::utils::files::resolve_image_mmap;
 #[cfg(unix)]
 use crate::utils::files::{create_dir_with_mode, create_file_with_mode};
@@ -382,6 +383,7 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
     let pb = ByteProgress::new(part_name, img_size);
     let mut files_to_extract = Vec::new();
     let mut symlinks_extracted = 0u64;
+    let skip_bloat = skip_during_extract();
 
     for entry in fs
         .walk_dir("/")
@@ -392,6 +394,10 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
         let path_str = entry_path.to_string_lossy();
         let rel_path = path_str.strip_prefix('/').unwrap_or(&path_str);
         if rel_path.is_empty() {
+            continue;
+        }
+        if skip_bloat && let Some(dump_rel) = bloat_extract_path(part_name, Path::new(rel_path)) {
+            info!(file = %dump_rel.display(), "bloat.apk.removed");
             continue;
         }
 
@@ -425,12 +431,16 @@ fn try_extract_erofs(slice: &[u8], output_dir: &Path, part_name: &str) -> Result
             debug!(partition = part_name, symlink = %target.display(), "erofs.extract_symlink");
         }
     }
+    // Longest-processing-time-first: the biggest files would otherwise straggle
+    // at the end of the walk and leave most workers idle while one writes them.
+    files_to_extract.sort_unstable_by_key(|(inode, _)| std::cmp::Reverse(inode.data_size()));
+
     let files_extracted = symlinks_extracted + files_to_extract.len() as u64;
     let bytes_extracted = AtomicU64::new(0);
 
     files_to_extract
         .into_par_iter()
-        .with_min_len(32)
+        .with_min_len(8)
         .try_for_each(|(inode, target)| -> Result<()> {
             let expected_size = inode.data_size() as usize;
             #[cfg(unix)]

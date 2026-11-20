@@ -3,7 +3,22 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::info;
+
+/// When true, the filesystem extractors drop bloat files instead of writing
+/// them, because the finalize cleanup would delete them anyway. The final dump
+/// is identical; this only avoids decompressing and writing dead data.
+static SKIP_DURING_EXTRACT: AtomicBool = AtomicBool::new(false);
+
+pub fn set_skip_during_extract(enabled: bool) {
+    SKIP_DURING_EXTRACT.store(enabled, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn skip_during_extract() -> bool {
+    SKIP_DURING_EXTRACT.load(Ordering::Relaxed)
+}
 
 use crate::utils::dump_metadata::write_all_files_list;
 
@@ -142,6 +157,15 @@ pub fn classify_bloat_path(path: &Path) -> BloatKind {
     }
 }
 
+/// Dump-relative path of a file that cleanup would delete, if any.
+///
+/// `relative` is relative to the partition directory, so it is prefixed with
+/// the partition name to match the paths `cleanup_bloat` classifies.
+pub fn bloat_extract_path(partition: &str, relative: &Path) -> Option<PathBuf> {
+    let dump_relative = Path::new(partition).join(relative);
+    (classify_bloat_path(&dump_relative) == BloatKind::Apk).then_some(dump_relative)
+}
+
 fn is_git_path(path: &Path) -> bool {
     path.components()
         .next()
@@ -258,4 +282,34 @@ pub fn cleanup_bloat(dump_dir: &Path, config: &CleanupConfig) -> Result<CleanupR
     write_all_files_list(dump_dir, &mut files)?;
 
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_filter_matches_cleanup_classification() {
+        let cases = [
+            ("product/priv-app/GmsCore/GmsCore.apk", true),
+            ("system/system/apex/com.google.android.art.apex", true),
+            ("product/app/YouTube/YouTube.apk", true),
+            ("vendor/app/GoogleExtShared/GoogleExtShared.apk", true),
+            ("product/priv-app/AiCore/AiCore.apk", false),
+            ("system/framework/framework.jar", false),
+        ];
+        for (path, expected) in cases {
+            let (partition, rest) = path.split_once('/').unwrap();
+            let filtered = bloat_extract_path(partition, Path::new(rest));
+            assert_eq!(filtered.is_some(), expected, "extract filter for {path}");
+            if let Some(dump_relative) = filtered {
+                assert_eq!(
+                    classify_bloat_path(&dump_relative),
+                    BloatKind::Apk,
+                    "filtered path must be classified as bloat by cleanup"
+                );
+                assert_eq!(dump_relative, Path::new(path));
+            }
+        }
+    }
 }

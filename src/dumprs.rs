@@ -10,7 +10,9 @@ use walkdir::WalkDir;
 use crate::steps::extract_archive::extract_archive;
 use crate::steps::extract_images::extract_images_with_cleanup;
 use crate::steps::prepare_images::prepare_images;
-use crate::utils::bloat_cleanup::{CleanupConfig, cleanup_bloat, cleanup_enabled};
+use crate::utils::bloat_cleanup::{
+    CleanupConfig, cleanup_bloat, cleanup_enabled, set_skip_during_extract,
+};
 use crate::utils::device_info::DeviceInfo;
 use crate::utils::dump_metadata::{
     generate_board_info, preserve_auxiliary_files, write_all_files_list,
@@ -86,6 +88,14 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
     }
 
     set_allow_early_extract(options.partitions.is_empty() && !options.skip_prepare);
+    let bloat_cleanup_enabled = !options.skip_bloat_cleanup
+        && cleanup_enabled(
+            std::env::var("CLEANUP_BLOAT").ok().as_deref(),
+            std::env::var("CLEANUP_GAPPS").ok().as_deref(),
+        );
+    // Sidecars are generated from the extracted tree, so keep bloat files when
+    // metadata emission is requested.
+    set_skip_during_extract(bloat_cleanup_enabled && options.fs_metadata.is_none());
     let run_res = (|| -> Result<()> {
         if should_skip_extract {
             info!(
@@ -251,12 +261,9 @@ pub fn dumprs(file: &Path, output_path: &Path, options: &DumpOptions) -> Result<
 
     // DumprX runs this immediately before push; do it after the first manifest
     // so the regenerated manifest keeps the self-reference sentinel.
-    let enabled = !options.skip_bloat_cleanup
-        && cleanup_enabled(
-            std::env::var("CLEANUP_BLOAT").ok().as_deref(),
-            std::env::var("CLEANUP_GAPPS").ok().as_deref(),
-        );
-    if enabled && let Err(error) = cleanup_bloat(output_path, &CleanupConfig { enabled: true }) {
+    if bloat_cleanup_enabled
+        && let Err(error) = cleanup_bloat(output_path, &CleanupConfig { enabled: true })
+    {
         tracing::warn!(error = %error, "bloat.cleanup_failed");
     }
     info!(
