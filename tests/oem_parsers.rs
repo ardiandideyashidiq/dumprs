@@ -14,6 +14,7 @@ use dumprs::formats::oem::ops::extract_ops;
 use dumprs::formats::oem::ozip::decrypt_ozip;
 use dumprs::formats::oem::pac::extract_pac;
 use dumprs::formats::oem::qfil::extract_qfil;
+use dumprs::formats::oem::ruu::decrypt_ruu_zip;
 use dumprs::formats::oem::update_app::extract_update_app;
 use dumprs::steps::extract_archive::unpack_archive;
 use dumprs::steps::oem::prepare_oem_containers;
@@ -758,6 +759,85 @@ fn prepare_oem_containers_extracts_ops() {
     assert_eq!(
         fs::read(raw.join("boot.img")).expect("boot.img"),
         b"BOOTDATA12345678"
+    );
+}
+
+fn write_encrypted_ruu(root: &std::path::Path, plain: &[u8]) -> std::path::PathBuf {
+    use aes::Aes128;
+    use cbc::Encryptor;
+    use cbc::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
+
+    let key: [u8; 16] = [
+        0xf7, 0xda, 0x06, 0x26, 0x7c, 0xbc, 0x06, 0xbe, 0xcf, 0xfb, 0x4d, 0xcb, 0x24, 0xcf, 0x5a,
+        0x00,
+    ];
+    let iv: [u8; 16] = [
+        0x7c, 0x02, 0xda, 0x72, 0x8b, 0xbe, 0x40, 0xb4, 0xaf, 0x00, 0x9b, 0x06, 0x16, 0xda, 0xcf,
+        0xb7,
+    ];
+    let mut header = vec![0u8; 0x80];
+    header[..8].copy_from_slice(b"Htc@egi$");
+    header[8..10].copy_from_slice(&0xa4u16.to_be_bytes());
+    header[10] = 1;
+    let mut image = header;
+    let mut current_iv = iv;
+    for block in plain.chunks(0x8000) {
+        let mut encrypted = block.to_vec();
+        Encryptor::<Aes128>::new(&key.into(), &current_iv.into())
+            .encrypt_padded::<NoPadding>(&mut encrypted, block.len())
+            .expect("block encrypted");
+        current_iv.copy_from_slice(&encrypted[encrypted.len() - 16..]);
+        image.extend_from_slice(&encrypted);
+    }
+    let source = root.join("rom.zip");
+    fs::write(&source, image).expect("encrypted rom written");
+    source
+}
+
+/// Regression: an HTC encrypted rom.zip has a 128-byte header, then AES-CBC
+/// applied to the first 1 MiB of each `chunks << 20` region. A wrong chunk
+/// size or IV reset corrupts the recovered ZIP.
+#[test]
+fn decrypts_htc_ruu_zip() {
+    let root = temp_dir::temp_dir();
+    let plain: Vec<u8> = (0..0x10_0000).map(|i| (i % 251) as u8).collect();
+    let source = write_encrypted_ruu(&root, &plain);
+
+    decrypt_ruu_zip(&source, &root.join("decrypted.zip"), "m7_ul").expect("ruu decrypted");
+
+    assert_eq!(
+        fs::read(root.join("decrypted.zip")).expect("decrypted zip"),
+        plain
+    );
+}
+
+/// Regression: the archive entry point must detect an HTC-encrypted rom.zip,
+/// discover its device key, decrypt it and then extract the inner ZIP.
+#[test]
+fn unpack_archive_decrypts_ruu_zip() {
+    use std::io::Cursor;
+    use zip::write::SimpleFileOptions;
+
+    let root = temp_dir::temp_dir();
+    let mut zip_bytes = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(Cursor::new(&mut zip_bytes));
+        writer
+            .start_file("boot.img", SimpleFileOptions::default())
+            .expect("zip entry started");
+        writer.write_all(b"HTC-BOOT").expect("zip entry written");
+        writer.finish().expect("zip finished");
+    }
+    let mut plain = zip_bytes;
+    plain.resize(0x10_0000, 0);
+    let source = write_encrypted_ruu(&root, &plain);
+    let dest = root.join("out");
+
+    unpack_archive(&source, &dest).expect("ruu unpacked");
+
+    assert_eq!(
+        fs::read(dest.join("boot.img")).expect("boot.img"),
+        b"HTC-BOOT"
     );
 }
 

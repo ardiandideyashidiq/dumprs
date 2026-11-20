@@ -17,6 +17,7 @@ use crate::formats::fs_extract::extract_filesystem_slice;
 use crate::formats::kdz::{unpack_dz, unpack_kdz};
 use crate::formats::liblp::parse_lp_single_extents;
 use crate::formats::oem::ozip::decrypt_ozip;
+use crate::formats::oem::ruu::decrypt_ruu_zip_auto;
 use crate::formats::payload::ZIP_SLICE_MAGIC;
 use crate::formats::sevenzip::unpack_sevenzip;
 use crate::formats::sparse::{
@@ -165,6 +166,19 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
     if is_ozip {
         let decrypted = dest_dir.join("decrypted_ozip.zip");
         decrypt_ozip(archive_path, &decrypted)?;
+        unpack_archive(&decrypted, dest_dir)?;
+        let _ = fs::remove_file(&decrypted);
+        return Ok(());
+    }
+
+    // HTC encrypted rom.zip uses a proprietary header and AES-CBC layers.
+    let is_ruu_zip = File::open(archive_path).is_ok_and(|mut f| {
+        let mut magic = [0u8; 8];
+        f.read_exact(&mut magic).is_ok() && &magic == b"Htc@egi$"
+    });
+    if is_ruu_zip {
+        let decrypted = dest_dir.join("decrypted_ruu.zip");
+        decrypt_ruu_zip_auto(archive_path, &decrypted)?;
         unpack_archive(&decrypted, dest_dir)?;
         let _ = fs::remove_file(&decrypted);
         return Ok(());

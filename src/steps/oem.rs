@@ -57,6 +57,11 @@ pub fn prepare_oem_containers(extracted: &Path, raw_images: &Path) -> Result<()>
                 info!(file = name, variant = "qc", "oem.container.detected");
             }
             let _ = fs::remove_file(&path);
+        } else if kind == FirmwareKind::Ruu {
+            warn!(
+                file = name,
+                "ruu.executable.unsupported: extract the encrypted rom.zip first"
+            );
         } else if kind == FirmwareKind::Ops {
             info!(file = name, "oem.container.detected");
             extract_ops(&path, raw_images)?;

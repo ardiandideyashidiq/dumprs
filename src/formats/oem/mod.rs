@@ -8,4 +8,5 @@ pub mod ops;
 pub mod ozip;
 pub mod pac;
 pub mod qfil;
+pub mod ruu;
 pub mod update_app;

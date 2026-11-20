@@ -911,6 +911,7 @@ dependencies = [
  "brotli",
  "byteorder",
  "bzip2 0.4.4",
+ "cbc",
  "cfb-mode",
  "clap",
  "crc32fast",
