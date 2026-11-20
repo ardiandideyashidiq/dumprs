@@ -25,6 +25,148 @@ pub enum HeaderKind {
     Unknown,
 }
 
+/// Kind of a firmware container or OEM encryption layer.
+///
+/// Detection runs before extraction so the right handler can be selected from
+/// one place instead of a chain of filename checks spread across the pipeline.
+/// The variant order follows the priority of DumprX's `dumper.sh` dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirmwareKind {
+    /// Oppo/Realme/OnePlus `.ozip` (`OPPOENCRYPT!` magic).
+    Ozip,
+    /// OnePlus/Oppo `.ops`.
+    Ops,
+    /// Oppo `.ofp` (Qualcomm or MediaTek).
+    Ofp,
+    /// HTC `ruu_*.exe`.
+    Ruu,
+    /// Amlogic upgrade package.
+    Amlogic,
+    /// Qualcomm QFIL `rawprogram*.xml` set.
+    Qfil,
+    /// Nokia/Sharp/Unisoc `.nb0`.
+    Nb0,
+    /// Sony Xperia `.sin`.
+    SonySin,
+    /// Spreadtrum/Unisoc `.pac`.
+    Pac,
+    /// Android `super.img`.
+    Super,
+    /// Samsung `AP_*.tar.md5`.
+    TarMd5,
+    /// Android OTA `payload.bin` (`CrAU` magic).
+    Payload,
+    /// Plain zip container.
+    Zip,
+    /// Plain tar container.
+    Tar,
+    /// Gzip-compressed tar.
+    TarGz,
+    /// Bzip2-compressed tar.
+    TarBz2,
+    /// Xz-compressed tar.
+    TarXz,
+    /// LG `.kdz`.
+    Kdz,
+    /// LG `.dz`.
+    Dz,
+    /// Huawei `UPDATE.APP`.
+    HuaweiUpdateApp,
+    /// Rockchip upgrade image.
+    Rockchip,
+    /// Nothing identified; fall through to the generic pipeline.
+    Other,
+}
+
+fn members_match(lowered: &[String], pred: impl Fn(&str) -> bool) -> bool {
+    lowered.iter().any(|m| pred(m.as_str()))
+}
+
+/// Detect the firmware kind from the first bytes of a file, its name, and the
+/// member names of an already-opened archive.
+///
+/// `members` should contain paths as reported by the archive reader; matching
+/// is case-insensitive and uses the final path component where appropriate.
+pub fn detect_firmware_kind(head: &[u8], filename: &str, members: &[String]) -> FirmwareKind {
+    let name = filename.to_ascii_lowercase();
+    let lowered: Vec<String> = members.iter().map(|m| m.to_ascii_lowercase()).collect();
+    fn base(m: &str) -> &str {
+        m.rsplit('/').next().unwrap_or(m)
+    }
+
+    if head.starts_with(b"OPPOENCRYPT!") || name.ends_with(".ozip") {
+        return FirmwareKind::Ozip;
+    }
+    if name.ends_with(".ops") || members_match(&lowered, |m| base(m).ends_with(".ops")) {
+        return FirmwareKind::Ops;
+    }
+    if name.ends_with(".ofp") || members_match(&lowered, |m| base(m).ends_with(".ofp")) {
+        return FirmwareKind::Ofp;
+    }
+    if name.starts_with("ruu_") && name.ends_with(".exe") {
+        return FirmwareKind::Ruu;
+    }
+    if members_match(&lowered, |m| base(m).contains("aml")) {
+        return FirmwareKind::Amlogic;
+    }
+    if members_match(&lowered, |m| {
+        let b = base(m);
+        b.starts_with("rawprogram") && b.ends_with(".xml")
+    }) {
+        return FirmwareKind::Qfil;
+    }
+    if members_match(&lowered, |m| base(m).ends_with(".nb0")) {
+        return FirmwareKind::Nb0;
+    }
+    if members_match(&lowered, |m| base(m).ends_with(".sin")) {
+        return FirmwareKind::SonySin;
+    }
+    if name.ends_with(".pac") || members_match(&lowered, |m| base(m).ends_with(".pac")) {
+        return FirmwareKind::Pac;
+    }
+    if members_match(&lowered, |m| {
+        base(m).starts_with("super") && base(m).ends_with(".img")
+    }) {
+        return FirmwareKind::Super;
+    }
+    if name.ends_with(".tar.md5") {
+        return FirmwareKind::TarMd5;
+    }
+    if head.starts_with(b"CrAU") || members_match(&lowered, |m| base(m) == "payload.bin") {
+        return FirmwareKind::Payload;
+    }
+    // Member-based OEM containers must win over the generic container
+    // extension: a zip holding UPDATE.APP is a Huawei firmware, not a zip.
+    if members_match(&lowered, |m| base(m) == "update.app") {
+        return FirmwareKind::HuaweiUpdateApp;
+    }
+    if members_match(&lowered, |m| base(m) == "rockchip") {
+        return FirmwareKind::Rockchip;
+    }
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        return FirmwareKind::TarGz;
+    }
+    if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") {
+        return FirmwareKind::TarBz2;
+    }
+    if name.ends_with(".tar.xz") || name.ends_with(".txz") {
+        return FirmwareKind::TarXz;
+    }
+    if name.ends_with(".tar") {
+        return FirmwareKind::Tar;
+    }
+    if name.ends_with(".zip") {
+        return FirmwareKind::Zip;
+    }
+    if name.ends_with(".kdz") {
+        return FirmwareKind::Kdz;
+    }
+    if name.ends_with(".dz") {
+        return FirmwareKind::Dz;
+    }
+    FirmwareKind::Other
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ScatterInfo {
     /// Lowercased basename (e.g. `preloader_x670_h814.bin`) -> unslotted partition name (`preloader`).
@@ -548,5 +690,60 @@ mod tests {
         let mut erofs = vec![0u8; 2048];
         erofs[1024..1028].copy_from_slice(&EROFS_MAGIC.to_le_bytes());
         assert_eq!(sniff_header_kind(&erofs), HeaderKind::Filesystem);
+    }
+
+    /// Regression: OEM containers must be detected before the generic archive
+    /// fallback, otherwise their handlers are never invoked and the dump
+    /// silently produces an empty output. The expected values are taken from
+    /// the `dumper.sh` if/elif order, not from the detector itself.
+    #[test]
+    fn detects_firmware_kind_from_magic_filename_and_members() {
+        let cases: &[(&[u8], &str, &[&str], FirmwareKind)] = &[
+            (b"OPPOENCRYPT!0000", "fw.bin", &[], FirmwareKind::Ozip),
+            (b"", "fw.ozip", &[], FirmwareKind::Ozip),
+            (b"", "fw.zip", &["system.ops"], FirmwareKind::Ops),
+            (b"", "fw.ofp", &[], FirmwareKind::Ofp),
+            (b"", "ruu_2.10.651.1.exe", &[], FirmwareKind::Ruu),
+            (
+                b"",
+                "fw.zip",
+                &["UPDATE.APP"],
+                FirmwareKind::HuaweiUpdateApp,
+            ),
+            (
+                b"",
+                "fw.zip",
+                &["rawprogram0.xml", "system.img"],
+                FirmwareKind::Qfil,
+            ),
+            (b"", "fw.zip", &["system.pac"], FirmwareKind::Pac),
+            (b"", "fw.zip", &["system.nb0"], FirmwareKind::Nb0),
+            (b"", "fw.zip", &["system.sin"], FirmwareKind::SonySin),
+            // dumper.sh checks `super.img` before the rockchip branch.
+            (
+                b"",
+                "fw.zip",
+                &["rockchip", "super.img"],
+                FirmwareKind::Super,
+            ),
+            // dumper.sh checks `.ops` long before `UPDATE.APP`.
+            (
+                b"",
+                "fw.zip",
+                &["UPDATE.APP", "system.ops"],
+                FirmwareKind::Ops,
+            ),
+            (b"CrAU", "fw.bin", &[], FirmwareKind::Payload),
+            (b"", "fw.zip", &["super.img"], FirmwareKind::Super),
+            (b"", "fw.zip", &[], FirmwareKind::Zip),
+        ];
+        for &(head, filename, members, expected) in cases {
+            let members: Vec<String> = members.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(
+                detect_firmware_kind(head, filename, &members),
+                expected,
+                "head={head:?} filename={filename} members={members:?}"
+            );
+        }
     }
 }
