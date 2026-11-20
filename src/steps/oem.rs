@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 use tracing::{debug, info};
 
+use crate::formats::oem::qfil::{extract_qfil, list_targets};
 use crate::formats::oem::update_app::extract_update_app;
 use crate::utils::firmware::{FirmwareKind, detect_firmware_kind};
 
@@ -35,6 +36,11 @@ pub fn prepare_oem_containers(extracted: &Path, raw_images: &Path) -> Result<()>
             info!(file = name, "oem.container.detected");
             extract_update_app(&path, raw_images)?;
             let _ = fs::remove_file(&path);
+        } else if kind == FirmwareKind::Qfil {
+            info!(file = name, "oem.container.detected");
+            for target in list_targets(&path)? {
+                extract_qfil(&path, &target, raw_images)?;
+            }
         } else {
             debug!(file = name, ?kind, "oem.container.skipped");
         }

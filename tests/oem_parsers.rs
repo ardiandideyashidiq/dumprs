@@ -6,6 +6,7 @@
 #[path = "common/temp_dir.rs"]
 mod temp_dir;
 
+use dumprs::formats::oem::qfil::extract_qfil;
 use dumprs::formats::oem::update_app::extract_update_app;
 use dumprs::steps::oem::prepare_oem_containers;
 use std::fs;
@@ -125,6 +126,42 @@ fn prepare_oem_containers_extracts_update_app() {
     );
 }
 
+/// Regression: a QFIL rawprogram set found in the extracted archive must be
+/// assembled for every partition it describes, not just one.
+#[test]
+fn prepare_oem_containers_assembles_qfil_partitions() {
+    let root = temp_dir::temp_dir();
+    let extracted = root.join("extracted");
+    let raw = root.join("raw");
+    fs::create_dir_all(&extracted).expect("extracted dir created");
+    fs::create_dir_all(&raw).expect("raw dir created");
+
+    fs::write(extracted.join("a_sparse.img"), vec![b'A'; 4096]).expect("system chunk written");
+    fs::write(extracted.join("c_sparse.img"), vec![b'C'; 4096]).expect("vendor chunk written");
+    let xml = r#"<?xml version="1.0"?>
+<data>
+ <program SECTOR_SIZE_IN_BYTES="512" file_sector_offset="0" filename="a_sparse.img"
+          label="system" num_partition_sectors="8" physical_partition_number="0"
+          sparse="true" start_sector="0"/>
+ <program SECTOR_SIZE_IN_BYTES="512" file_sector_offset="0" filename="c_sparse.img"
+          label="vendor" num_partition_sectors="8" physical_partition_number="0"
+          sparse="true" start_sector="0"/>
+</data>
+"#;
+    fs::write(extracted.join("rawprogram_unsparse0.xml"), xml).expect("xml written");
+
+    prepare_oem_containers(&extracted, &raw).expect("QFIL assembled");
+
+    assert_eq!(
+        fs::read(raw.join("system.img")).expect("system.img"),
+        vec![b'A'; 4096]
+    );
+    assert_eq!(
+        fs::read(raw.join("vendor.img")).expect("vendor.img"),
+        vec![b'C'; 4096]
+    );
+}
+
 /// Side-by-side differential check against the tool this port replaces.
 ///
 /// Ignored by default because it needs `python3` and the DumprX checkout.
@@ -181,4 +218,55 @@ fn matches_splituapp_python_oracle() {
             "port differs from splituapp.py on {name}"
         );
     }
+}
+
+const QFIL_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<data>
+  <program SECTOR_SIZE_IN_BYTES="512" file_sector_offset="0" filename="a_sparse.img"
+           label="system" num_partition_sectors="16" physical_partition_number="0"
+           size_in_KB="8.0" sparse="true" start_sector="0"/>
+  <program SECTOR_SIZE_IN_BYTES="512" file_sector_offset="0" filename="b_sparse.img"
+           label="system" num_partition_sectors="16" physical_partition_number="0"
+           size_in_KB="8.0" sparse="true" start_sector="16"/>
+  <program SECTOR_SIZE_IN_BYTES="512" file_sector_offset="0" filename="other_sparse.img"
+           label="vendor" num_partition_sectors="16" physical_partition_number="0"
+           size_in_KB="8.0" sparse="true" start_sector="0"/>
+</data>
+"#;
+
+/// Regression: QFIL entries must be assembled at `start_sector *
+/// SECTOR_SIZE_IN_BYTES`, and entries for other partitions must be ignored.
+#[test]
+fn extracts_qfil_rawprogram_entries() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    fs::write(root.join("a_sparse.img"), vec![b'A'; 8192]).expect("first chunk written");
+    fs::write(root.join("b_sparse.img"), vec![b'B'; 8192]).expect("second chunk written");
+    let xml = root.join("rawprogram_unsparse0.xml");
+    fs::write(&xml, QFIL_XML).expect("xml written");
+
+    extract_qfil(&xml, "system", &out).expect("QFIL assembled");
+
+    let image = fs::read(out.join("system.img")).expect("system.img written");
+    let mut expected = vec![b'A'; 8192];
+    expected.extend(vec![b'B'; 8192]);
+    assert_eq!(image, expected);
+    assert!(!out.join("vendor.img").exists(), "other partitions ignored");
+}
+
+/// Regression: a missing source chunk must fail loudly instead of leaving
+/// zero-filled holes in the assembled image.
+#[test]
+fn rejects_missing_qfil_source_chunk() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    let xml = root.join("rawprogram_unsparse0.xml");
+    fs::write(&xml, QFIL_XML).expect("xml written");
+
+    assert!(
+        extract_qfil(&xml, "system", &out).is_err(),
+        "missing chunk files must be reported"
+    );
 }

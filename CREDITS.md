@@ -47,6 +47,16 @@ the following work:
 - [vmlinux-to-elf](https://github.com/marin-m/vmlinux-to-elf) by @marin-m
   (GPL-3.0) for the kallsyms discovery heuristics.
 
+## OEM containers
+
+- `splituapp.py` by SuperR @XDA, as bundled in GPL-3.0-only DumprX, for the
+  `UPDATE.APP` entry layout reproduced by `src/formats/oem/update_app.rs`.
+- The QFIL `rawprogram*.xml` sector assembly in `src/formats/oem/qfil.rs` was
+  inferred from DumprX's `packsparseimg` behaviour and the format's published
+  attribute names; no source from that tool is included.
+- [roxmltree](https://github.com/razrfalcon/roxmltree) by Yevhenii Reizner
+  (MIT OR Apache-2.0) for read-only parsing of QFIL rawprogram XML.
+
 ## Other projects
 
 See the `Credits` section of [`README.md`](README.md) for the firmware

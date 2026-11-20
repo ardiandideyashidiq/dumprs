@@ -109,10 +109,12 @@ pub fn detect_firmware_kind(head: &[u8], filename: &str, members: &[String]) -> 
     if members_match(&lowered, |m| base(m).contains("aml")) {
         return FirmwareKind::Amlogic;
     }
-    if members_match(&lowered, |m| {
-        let b = base(m);
-        b.starts_with("rawprogram") && b.ends_with(".xml")
-    }) {
+    if (name.starts_with("rawprogram") && name.ends_with(".xml"))
+        || members_match(&lowered, |m| {
+            let b = base(m);
+            b.starts_with("rawprogram") && b.ends_with(".xml")
+        })
+    {
         return FirmwareKind::Qfil;
     }
     if members_match(&lowered, |m| base(m).ends_with(".nb0")) {
@@ -723,6 +725,12 @@ mod tests {
                 FirmwareKind::Qfil,
             ),
             (b"", "fw.zip", &["system.pac"], FirmwareKind::Pac),
+            (
+                b"",
+                "rawprogram_unsparse0.xml",
+                &[] as &[&str],
+                FirmwareKind::Qfil,
+            ),
             (b"", "fw.zip", &["system.nb0"], FirmwareKind::Nb0),
             (b"", "fw.zip", &["system.sin"], FirmwareKind::SonySin),
             // dumper.sh checks `super.img` before the rockchip branch.
