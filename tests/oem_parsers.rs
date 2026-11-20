@@ -7,6 +7,7 @@
 mod temp_dir;
 
 use dumprs::formats::oem::amlogic::extract_amlogic;
+use dumprs::formats::oem::nb0::extract_nb0;
 use dumprs::formats::oem::qfil::extract_qfil;
 use dumprs::formats::oem::update_app::extract_update_app;
 use dumprs::steps::oem::prepare_oem_containers;
@@ -265,6 +266,77 @@ fn prepare_oem_containers_extracts_amlogic() {
     assert_eq!(
         fs::read(raw.join("boot.img")).expect("boot.img"),
         vec![b'B'; 512]
+    );
+}
+
+fn nb0_header(offset: u32, size: u32, name: &str) -> Vec<u8> {
+    let mut header = vec![0u8; 64];
+    header[..4].copy_from_slice(&offset.to_le_bytes());
+    header[4..8].copy_from_slice(&size.to_le_bytes());
+    header[16..16 + name.len()].copy_from_slice(name.as_bytes());
+    header
+}
+
+/// Regression: `.nb0` files store a count, 64-byte headers (offset, size,
+/// name at +16), then the payloads back-to-back after 4 + 64*count.
+#[test]
+fn extracts_nb0_images() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    let mut image = 2u32.to_le_bytes().to_vec();
+    image.extend(nb0_header(0x1000, 4096, "system"));
+    image.extend(nb0_header(0x2000, 2048, "boot"));
+    image.extend(vec![b'A'; 4096]);
+    image.extend(vec![b'B'; 2048]);
+    let path = root.join("firmware.nb0");
+    fs::write(&path, image).expect("nb0 written");
+
+    extract_nb0(&path, &out).expect("nb0 extracted");
+
+    assert_eq!(
+        fs::read(out.join("system")).expect("system"),
+        vec![b'A'; 4096]
+    );
+    assert_eq!(fs::read(out.join("boot")).expect("boot"), vec![b'B'; 2048]);
+}
+
+/// Regression: a payload shorter than the declared size must be reported
+/// instead of silently producing a truncated partition.
+#[test]
+fn rejects_truncated_nb0_payload() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    let mut image = 1u32.to_le_bytes().to_vec();
+    image.extend(nb0_header(0, 4096, "system"));
+    image.extend(vec![b'A'; 16]);
+    let path = root.join("firmware.nb0");
+    fs::write(&path, image).expect("nb0 written");
+
+    assert!(extract_nb0(&path, &out).is_err());
+}
+
+/// Regression: a standalone `.nb0` must be routed to its parser before the
+/// generic firmware pass sees it as an unknown image.
+#[test]
+fn prepare_oem_containers_extracts_nb0() {
+    let root = temp_dir::temp_dir();
+    let extracted = root.join("extracted");
+    let raw = root.join("raw");
+    fs::create_dir_all(&extracted).expect("extracted dir created");
+    fs::create_dir_all(&raw).expect("raw dir created");
+
+    let mut image = 1u32.to_le_bytes().to_vec();
+    image.extend(nb0_header(0, 512, "system"));
+    image.extend(vec![b'S'; 512]);
+    fs::write(extracted.join("firmware.nb0"), image).expect("nb0 written");
+
+    prepare_oem_containers(&extracted, &raw).expect("nb0 extracted");
+
+    assert_eq!(
+        fs::read(raw.join("system")).expect("system"),
+        vec![b'S'; 512]
     );
 }
 
