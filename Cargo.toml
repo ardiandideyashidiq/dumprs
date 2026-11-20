@@ -40,6 +40,8 @@ backhand = { version = "0.25.5", default-features = false, features = ["gzip", "
 termimad = "0.35"
 rust-fs-erofs = "0.6"
 roxmltree = "0.21"
+aes = "0.9"
+ecb = "0.2"
 
 [build-dependencies]
 prost = "0.13"

@@ -896,6 +896,7 @@ name = "dumprs"
 version = "0.1.0"
 dependencies = [
  "adler2",
+ "aes",
  "anyhow",
  "backhand",
  "brotli",
@@ -905,6 +906,7 @@ dependencies = [
  "crc32fast",
  "criterion",
  "dtoolkit",
+ "ecb",
  "erofs-rs",
  "ext4-view",
  "flate2",
@@ -934,6 +936,15 @@ dependencies = [
  "xz2",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "ecb"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26f2a8b3e564eba0877223dc343703ad0385794e882e6d13f3a4dd5c6b1f41ac"
+dependencies = [
+ "cipher",
 ]
 
 [[package]]

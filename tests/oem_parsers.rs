@@ -8,11 +8,14 @@ mod temp_dir;
 
 use dumprs::formats::oem::amlogic::extract_amlogic;
 use dumprs::formats::oem::nb0::extract_nb0;
+use dumprs::formats::oem::ozip::decrypt_ozip;
 use dumprs::formats::oem::pac::extract_pac;
 use dumprs::formats::oem::qfil::extract_qfil;
 use dumprs::formats::oem::update_app::extract_update_app;
+use dumprs::steps::extract_archive::unpack_archive;
 use dumprs::steps::oem::prepare_oem_containers;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 /// One `UPDATE.APP` entry. Layout is taken from DumprX's `splituapp.py`:
@@ -436,6 +439,110 @@ fn prepare_oem_containers_extracts_pac() {
         fs::read(raw.join("system.img")).expect("system.img"),
         vec![b'P'; 512]
     );
+}
+
+// Independent AES-128-ECB vectors produced with OpenSSL using the `mkey`
+// published by ozipdecrypt.py. The key block decrypts to `PK\x03\x04...`,
+// which is how the tool identifies the right key.
+const OZIP_KEY_BLOCK: &[u8] = &[
+    0x4c, 0x75, 0x22, 0x52, 0x4f, 0x06, 0x87, 0x34, 0xeb, 0x72, 0x61, 0x38, 0xa6, 0x91, 0xfc, 0x2b,
+];
+const OZIP_SECOND_BLOCK: &[u8] = &[
+    0x59, 0x28, 0xf4, 0xea, 0x0f, 0x35, 0xe6, 0x90, 0xe1, 0xde, 0xfe, 0x25, 0x04, 0xa4, 0x73, 0x41,
+];
+
+/// Regression: an ozip is a 0x1050-byte header followed by alternating
+/// 16-byte AES-ECB blocks and 0x4000 plaintext blocks. Mixing those up yields
+/// a corrupt ZIP.
+#[test]
+fn decrypts_ozip_stream() {
+    let root = temp_dir::temp_dir();
+    let source = root.join("firmware.ozip");
+    let output = root.join("firmware.zip");
+
+    let mut image = vec![0u8; 0x1060];
+    image[..12].copy_from_slice(b"OPPOENCRYPT!");
+    image[0x1050..0x1060].copy_from_slice(OZIP_KEY_BLOCK);
+    let plain_tail = vec![0x5a; 0x4000];
+    image.extend_from_slice(&plain_tail);
+    image.extend_from_slice(OZIP_SECOND_BLOCK);
+    image.extend_from_slice(&plain_tail);
+    fs::write(&source, image).expect("ozip written");
+
+    decrypt_ozip(&source, &output).expect("ozip decrypted");
+
+    let decrypted = fs::read(&output).expect("decrypted zip readable");
+    let mut expected = b"PK\x03\x040123456789ab".to_vec();
+    expected.extend_from_slice(&plain_tail);
+    expected.extend_from_slice(b"SECONDBLOCK12345");
+    expected.extend_from_slice(&plain_tail);
+    assert_eq!(decrypted, expected);
+}
+
+/// Regression: an unknown key must be reported, not silently copied.
+#[test]
+fn rejects_ozip_with_unknown_key() {
+    let root = temp_dir::temp_dir();
+    let source = root.join("firmware.ozip");
+    let output = root.join("firmware.zip");
+    let mut image = vec![0u8; 0x1060];
+    image[..12].copy_from_slice(b"OPPOENCRYPT!");
+    fs::write(&source, image).expect("ozip written");
+
+    assert!(decrypt_ozip(&source, &output).is_err());
+}
+
+/// Regression: the archive entry point must decrypt an ozip before the
+/// generic ZIP extractor sees it, otherwise the firmware is left untouched.
+#[test]
+fn unpack_archive_decrypts_ozip_then_extracts_zip() {
+    use aes::Aes128;
+    use aes::cipher::{Block, BlockModeEncrypt, KeyInit};
+    use ecb::Encryptor;
+    use std::io::Cursor;
+    use zip::write::SimpleFileOptions;
+
+    let root = temp_dir::temp_dir();
+    let source = root.join("firmware.ozip");
+    let dest = root.join("out");
+    fs::create_dir_all(&dest).expect("output dir created");
+
+    let mut zip_bytes = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(Cursor::new(&mut zip_bytes));
+        writer
+            .start_file("boot.img", SimpleFileOptions::default())
+            .expect("zip entry started");
+        writer.write_all(b"BOOT-IMAGE").expect("zip entry written");
+        writer.finish().expect("zip finished");
+    }
+    let key: [u8; 16] = parse_hex_key("D6ECCF0AE5ACD4E0E92E522DE7C1381E");
+    let mut cipher = Encryptor::<Aes128>::new(&key.into());
+    let mut block =
+        Block::<Encryptor<Aes128>>::try_from(&zip_bytes[..16]).expect("16-byte AES block");
+    cipher.encrypt_block(&mut block);
+    let mut encrypted = zip_bytes.clone();
+    encrypted[..16].copy_from_slice(&block);
+
+    let mut ozip = vec![0u8; 0x1050];
+    ozip[..12].copy_from_slice(b"OPPOENCRYPT!");
+    ozip.extend_from_slice(&encrypted);
+    fs::write(&source, ozip).expect("ozip written");
+
+    unpack_archive(&source, &dest).expect("ozip unpacked");
+
+    assert_eq!(
+        fs::read(dest.join("boot.img")).expect("boot.img"),
+        b"BOOT-IMAGE"
+    );
+}
+
+fn parse_hex_key(value: &str) -> [u8; 16] {
+    let mut key = [0u8; 16];
+    for (i, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).expect("hex key");
+    }
+    key
 }
 
 /// Side-by-side differential check against the tool this port replaces.

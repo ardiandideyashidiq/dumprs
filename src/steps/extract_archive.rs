@@ -16,6 +16,7 @@ use tracing::{debug, info};
 use crate::formats::fs_extract::extract_filesystem_slice;
 use crate::formats::kdz::{unpack_dz, unpack_kdz};
 use crate::formats::liblp::parse_lp_single_extents;
+use crate::formats::oem::ozip::decrypt_ozip;
 use crate::formats::payload::ZIP_SLICE_MAGIC;
 use crate::formats::sevenzip::unpack_sevenzip;
 use crate::formats::sparse::{
@@ -153,6 +154,21 @@ pub fn unpack_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         .to_lowercase();
 
     fs::create_dir_all(dest_dir)?;
+
+    // Oppo .ozip is an encrypted ZIP. Decrypt before the generic container
+    // dispatch, otherwise the 7z fallback fails on the OPPOENCRYPT! header.
+    let is_ozip = filename.ends_with(".ozip")
+        || File::open(archive_path).is_ok_and(|mut f| {
+            let mut magic = [0u8; 12];
+            f.read_exact(&mut magic).is_ok() && &magic == b"OPPOENCRYPT!"
+        });
+    if is_ozip {
+        let decrypted = dest_dir.join("decrypted_ozip.zip");
+        decrypt_ozip(archive_path, &decrypted)?;
+        unpack_archive(&decrypted, dest_dir)?;
+        let _ = fs::remove_file(&decrypted);
+        return Ok(());
+    }
 
     if filename.ends_with(".zip") {
         let start_time = Instant::now();

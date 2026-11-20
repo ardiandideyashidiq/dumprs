@@ -49,6 +49,12 @@ the following work:
 
 ## OEM containers
 
+- `ozipdecrypt.py` by [bkerler](https://github.com/bkerler/oppo_ozip_decrypt)
+  (MIT) for the `.ozip` AES-128-ECB layout and published key list.
+- [aes](https://github.com/RustCrypto/block-ciphers) and
+  [ecb](https://github.com/RustCrypto/block-ciphers) (MIT OR Apache-2.0) from
+  RustCrypto for pure-Rust AES-ECB decryption.
+
 - `splituapp.py` by SuperR @XDA, as bundled in GPL-3.0-only DumprX, for the
   `UPDATE.APP` entry layout reproduced by `src/formats/oem/update_app.rs`.
 - The PAC record layout in `src/formats/oem/pac.rs` follows `pacExtractor.py`
