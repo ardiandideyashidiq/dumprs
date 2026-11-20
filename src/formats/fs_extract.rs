@@ -22,6 +22,26 @@ use std::os::unix::fs::PermissionsExt;
 use crate::utils::files::resolve_image_mmap;
 use crate::utils::progress::ByteProgress;
 
+/// Filesystem extraction backends, in the order dumprs attempts them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsBackend {
+    Erofs,
+    Ext4,
+    Squashfs,
+    Mtk,
+    SevenZInProcess,
+    SevenZCli,
+}
+
+pub const FS_BACKEND_ORDER: &[FsBackend] = &[
+    FsBackend::Erofs,
+    FsBackend::Ext4,
+    FsBackend::Squashfs,
+    FsBackend::Mtk,
+    FsBackend::SevenZInProcess,
+    FsBackend::SevenZCli,
+];
+
 const MTK_MAGIC_1: u32 = 0x5888_1688;
 const MTK_MAGIC_2: u32 = 0x5889_1689;
 thread_local! {

@@ -8,6 +8,7 @@ use tracing::{debug, info};
 use crate::formats::sdat2img::{sdat2img, sdat2img_from_reader};
 use crate::formats::sparse::unsparse_file;
 use crate::utils::files::move_or_copy;
+use crate::utils::oem_image::consolidate_dat_chunks;
 use crate::utils::progress::ByteProgress;
 
 fn copy_with_progress<R: Read>(
@@ -40,6 +41,8 @@ pub fn get_raw_image(partition: &str, files_path: &Path, output_image_path: &Pat
     if output_image_path.is_file() {
         return Ok(true);
     }
+
+    consolidate_dat_chunks(files_path, partition)?;
 
     let brotli_image = files_path.join(format!("{}.new.dat.br", partition));
     let xz_image = files_path.join(format!("{}.new.dat.xz", partition));

@@ -18,6 +18,8 @@ pub const PARTITIONS: &[(&str, PartitionType)] = &[
     ("boot", PartitionType::Bootimage),
     ("boot-debug", PartitionType::Bootimage),
     ("dtbo", PartitionType::Raw),
+    ("dtb", PartitionType::Raw),
+    ("vbmeta", PartitionType::Raw),
     ("init_boot", PartitionType::Bootimage),
     ("recovery", PartitionType::Bootimage),
     ("vendor_boot", PartitionType::Bootimage),
@@ -27,6 +29,10 @@ pub const PARTITIONS: &[(&str, PartitionType)] = &[
     ("exaid", PartitionType::Bootimage),
     ("rescue", PartitionType::Bootimage),
     ("tz", PartitionType::Raw),
+    ("odmko", PartitionType::Raw),
+    ("version", PartitionType::Raw),
+    ("nt_log", PartitionType::Raw),
+    ("socko", PartitionType::Raw),
     // Logical partitions
     ("super", PartitionType::Logical),
     // Partitions with a standard filesystem
@@ -44,6 +50,7 @@ pub const PARTITIONS: &[(&str, PartitionType)] = &[
     // SoC vendor/OEM/ODM
     ("cust", PartitionType::Filesystem),
     ("factory", PartitionType::Filesystem),
+    ("hw_product", PartitionType::Filesystem),
     ("india", PartitionType::Filesystem),
     ("mi_ext", PartitionType::Filesystem),
     ("modem", PartitionType::Filesystem),
@@ -74,12 +81,57 @@ pub const PARTITIONS: &[(&str, PartitionType)] = &[
     ("special_preload", PartitionType::Filesystem),
     ("systemex", PartitionType::Filesystem),
     ("xrom", PartitionType::Filesystem),
+    // Transsion tr_* family
+    ("tr_product", PartitionType::Filesystem),
+    ("tr_region", PartitionType::Filesystem),
+    ("tr_carrier", PartitionType::Filesystem),
+    ("tr_mi", PartitionType::Filesystem),
+    ("tr_preload", PartitionType::Filesystem),
+    ("tr_company", PartitionType::Filesystem),
+    ("tr_system", PartitionType::Filesystem),
+    ("tr_overlayfs", PartitionType::Filesystem),
+    ("tr_theme", PartitionType::Filesystem),
+    ("tr_manifest", PartitionType::Filesystem),
+    ("tr_misc", PartitionType::Filesystem),
+];
+
+/// Partitions that may carry a MOTO/ASUS EXT4 header in OEM images.
+pub const EXT4_PARTITIONS: &[&str] = &[
+    "system",
+    "vendor",
+    "cust",
+    "odm",
+    "oem",
+    "factory",
+    "product",
+    "xrom",
+    "systemex",
+    "oppo_product",
+    "preload_common",
+    "hw_product",
+    "product_h",
+    "preas",
+    "preavs",
 ];
 
 pub const ALTERNATIVE_PARTITION_NAMES: &[(&str, &str)] = &[
     ("boot-verified", "boot"),
     ("dtbo-verified", "dtbo"),
+    ("recovery-verified", "recovery"),
+    ("vbmeta-verified", "vbmeta"),
     ("NON-HLOS", "modem"),
+];
+
+/// File-name mappings from DumprX's `OTHERPARTITIONS`.
+pub const OTHER_PARTITION_FILES: &[(&str, &str)] = &[
+    ("tz.mbn", "tz"),
+    ("tz.img", "tz"),
+    ("modem.img", "modem"),
+    ("NON-HLOS", "modem"),
+    ("boot-verified.img", "boot"),
+    ("recovery-verified.img", "recovery"),
+    ("dtbo-verified.img", "dtbo"),
+    ("vbmeta-verified.img", "vbmeta"),
 ];
 
 pub fn get_partition_name(partition_name: &str) -> &str {
@@ -89,6 +141,20 @@ pub fn get_partition_name(partition_name: &str) -> &str {
         }
     }
     partition_name
+}
+
+/// Resolve a firmware file name to its canonical partition name.
+pub fn canonicalize_other_partition(file_name: &str) -> &str {
+    for (alias, generic) in OTHER_PARTITION_FILES {
+        if *alias == file_name {
+            return generic;
+        }
+    }
+    let stem = file_name
+        .strip_suffix(".img")
+        .or_else(|| file_name.strip_suffix(".mbn"))
+        .unwrap_or(file_name);
+    get_partition_name(stem)
 }
 
 pub fn get_partition_type(partition_name: &str) -> Option<PartitionType> {
@@ -154,6 +220,24 @@ pub fn fix_aliases(images_path: &Path) -> Result<()> {
                 "Failed to rename alias {} to {}",
                 alt_path.display(),
                 partition_path.display()
+            )
+        })?;
+    }
+    for &(source, canonical) in OTHER_PARTITION_FILES {
+        let source_path = images_path.join(source);
+        let target_path = images_path.join(format!("{canonical}.img"));
+        if !source_path.is_file() || source_path == target_path {
+            continue;
+        }
+        if target_path.exists() {
+            let _ = fs::remove_file(&source_path);
+            continue;
+        }
+        fs::rename(&source_path, &target_path).with_context(|| {
+            format!(
+                "Failed to rename {} to {}",
+                source_path.display(),
+                target_path.display()
             )
         })?;
     }

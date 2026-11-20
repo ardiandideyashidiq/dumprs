@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::formats::sparse::unsparse_file;
 use crate::steps::oem::prepare_oem_containers;
@@ -14,6 +14,7 @@ use crate::utils::firmware::{
     is_scatter_filename, sniff_file_header_kind, strip_slot_suffix,
 };
 use crate::utils::multipartitions::get_multipartition_rules;
+use crate::utils::oem_image::{ext4_header_offset, normalize_oplus_dat_names, strip_header};
 use crate::utils::partitions::{correct_ab_filenames, fix_aliases, get_partition_names_with_ab};
 use crate::utils::raw_image::get_raw_image;
 use crate::utils::sparsed_images::prepare_sparsed_images;
@@ -30,6 +31,8 @@ pub fn prepare_raw_images(files_path: &Path, raw_images_path: &Path) -> Result<(
 }
 
 pub fn prepare_images(extracted_archive_path: &Path, raw_images_path: &Path) -> Result<()> {
+    // Normalize OPlus NV-ID file names once, before the parallel raw-image pass.
+    normalize_oplus_dat_names(extracted_archive_path)?;
     // Check for sparsed images
     prepare_sparsed_images(extracted_archive_path)?;
 
@@ -172,6 +175,19 @@ fn prepare_firmware_and_scatter(
             let dst_img = raw_images_path.join(format!("{}.img", unslotted_stem));
             if dst.exists() || dst_img.exists() {
                 return Ok(());
+            }
+
+            if crate::utils::partitions::EXT4_PARTITIONS.contains(&unslotted_stem) {
+                match fs::read(&src_path) {
+                    Ok(image_bytes) => {
+                        let offset = ext4_header_offset(&image_bytes);
+                        if offset > 0 {
+                            fs::write(&src_path, strip_header(&image_bytes, offset))?;
+                            info!(file = %target_name, offset, "partition.ext4_header_stripped");
+                        }
+                    }
+                    Err(error) => warn!(file = %target_name, error = %error, "partition.ext4_header_read_failed"),
+                }
             }
 
             let kind = sniff_file_header_kind(&src_path)?;

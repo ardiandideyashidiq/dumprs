@@ -4,6 +4,7 @@ pub mod files;
 pub mod firmware;
 pub mod fs_metadata;
 pub mod multipartitions;
+pub mod oem_image;
 pub mod oem_postprocess;
 pub mod partitions;
 pub mod progress;
