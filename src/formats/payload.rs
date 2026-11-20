@@ -90,6 +90,55 @@ fn write_at(file: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()>
     Ok(())
 }
 
+#[cfg(unix)]
+fn read_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    while !buf.is_empty() {
+        let n = file.read_at(buf, offset)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to read source extent",
+            ));
+        }
+        buf = &mut buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = file.seek_read(buf, offset)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to read source extent",
+            ));
+        }
+        buf = &mut buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
+}
+
+fn read_extents(file: &File, extents: &[update_engine::Extent]) -> Result<Vec<u8>> {
+    let total: u64 = extents
+        .iter()
+        .map(|e| e.num_blocks.unwrap_or(0) * BLOCK_SIZE)
+        .sum();
+    let mut out = Vec::with_capacity(total as usize);
+    for ext in extents {
+        let len = (ext.num_blocks.unwrap_or(0) * BLOCK_SIZE) as usize;
+        let mut buf = vec![0u8; len];
+        read_at(file, &mut buf, ext.start_block.unwrap_or(0) * BLOCK_SIZE)?;
+        out.extend_from_slice(&buf);
+    }
+    Ok(out)
+}
+
 fn compute_partition_size(partition: &update_engine::PartitionUpdate) -> u64 {
     let max_extent_end = partition
         .operations
@@ -249,9 +298,13 @@ fn parse_partition_operations(
         out_file.set_len(partition_size)?;
     }
 
-    partition.operations.par_iter().try_for_each_init(
-        || Vec::with_capacity(2 * 1024 * 1024),
-        |decompressed, operation| -> Result<()> {
+    // Operations are ordered: a MOVE or SOURCE_COPY may read blocks written by
+    // an earlier operation, so they cannot run in parallel.
+    let mut decompressed = Vec::with_capacity(2 * 1024 * 1024);
+    partition
+        .operations
+        .iter()
+        .try_for_each(|operation| -> Result<()> {
             let op_type = OpType::try_from(operation.r#type)
                 .map_err(|_| anyhow::anyhow!("Unknown operation type: {}", operation.r#type))?;
 
@@ -297,14 +350,18 @@ fn parse_partition_operations(
                 OpType::ReplaceXz => {
                     decompressed.clear();
                     let mut decoder = xz2::read::XzDecoder::new(blob);
-                    decoder.read_to_end(decompressed)?;
-                    write_extents(out_file, extents, decompressed)?
+                    decoder.read_to_end(&mut decompressed)?;
+                    write_extents(out_file, extents, &decompressed)?
                 }
                 OpType::ReplaceBz => {
                     decompressed.clear();
                     let mut decoder = bzip2::read::BzDecoder::new(blob);
-                    decoder.read_to_end(decompressed)?;
-                    write_extents(out_file, extents, decompressed)?
+                    decoder.read_to_end(&mut decompressed)?;
+                    write_extents(out_file, extents, &decompressed)?
+                }
+                OpType::Move | OpType::SourceCopy => {
+                    let source = read_extents(out_file, &operation.src_extents)?;
+                    write_extents(out_file, extents, &source)?
                 }
                 _ => {
                     bail!("Unhandled operation type: {:?}", op_type);
@@ -312,8 +369,7 @@ fn parse_partition_operations(
             };
             pb.inc(written);
             Ok(())
-        },
-    )?;
+        })?;
 
     Ok(())
 }

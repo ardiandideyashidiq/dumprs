@@ -42,6 +42,7 @@ pub fn get_raw_image(partition: &str, files_path: &Path, output_image_path: &Pat
     }
 
     let brotli_image = files_path.join(format!("{}.new.dat.br", partition));
+    let xz_image = files_path.join(format!("{}.new.dat.xz", partition));
     let dat_image = files_path.join(format!("{}.new.dat", partition));
     let transfer_list = files_path.join(format!("{}.transfer.list", partition));
     let lz4_image = files_path.join(format!("{}.img.lz4", partition));
@@ -82,6 +83,28 @@ pub fn get_raw_image(partition: &str, files_path: &Path, output_image_path: &Pat
             brotli::Decompressor::new(BufReader::with_capacity(256 * 1024, input_file), 256 * 1024);
         copy_with_progress(reader, &dat_image, partition, br_size.saturating_mul(2))?;
         let _ = fs::remove_file(&brotli_image);
+    }
+
+    if xz_image.is_file() {
+        if transfer_list.is_file() && !dat_image.is_file() {
+            info!(partition, "raw_image.xz_sdat.stream");
+            let input_file = File::open(&xz_image)
+                .with_context(|| format!("Failed to open {}", xz_image.display()))?;
+            let mut reader =
+                xz2::read::XzDecoder::new(BufReader::with_capacity(256 * 1024, input_file));
+            sdat2img_from_reader(&transfer_list, &mut reader, output_image_path)?;
+            let _ = fs::remove_file(&xz_image);
+            let _ = fs::remove_file(&transfer_list);
+            return Ok(true);
+        }
+
+        let xz_size = fs::metadata(&xz_image).map(|m| m.len()).unwrap_or(0);
+        info!(partition, input_size = %HumanBytes(xz_size), "raw_image.xz.decompress");
+        let input_file = File::open(&xz_image)
+            .with_context(|| format!("Failed to open {}", xz_image.display()))?;
+        let decoder = xz2::read::XzDecoder::new(BufReader::with_capacity(256 * 1024, input_file));
+        copy_with_progress(decoder, &dat_image, partition, xz_size.saturating_mul(4))?;
+        let _ = fs::remove_file(&xz_image);
     }
 
     if dat_image.is_file() && transfer_list.is_file() {
