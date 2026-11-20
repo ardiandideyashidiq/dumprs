@@ -4,6 +4,7 @@ pub mod erofs_writer;
 pub mod fs_extract;
 pub mod kdz;
 pub mod liblp;
+pub mod oem;
 pub mod payload;
 pub mod sdat2img;
 pub mod sevenzip;

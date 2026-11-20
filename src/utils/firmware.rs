@@ -137,7 +137,7 @@ pub fn detect_firmware_kind(head: &[u8], filename: &str, members: &[String]) -> 
     }
     // Member-based OEM containers must win over the generic container
     // extension: a zip holding UPDATE.APP is a Huawei firmware, not a zip.
-    if members_match(&lowered, |m| base(m) == "update.app") {
+    if name == "update.app" || members_match(&lowered, |m| base(m) == "update.app") {
         return FirmwareKind::HuaweiUpdateApp;
     }
     if members_match(&lowered, |m| base(m) == "rockchip") {
@@ -708,6 +708,12 @@ mod tests {
                 b"",
                 "fw.zip",
                 &["UPDATE.APP"],
+                FirmwareKind::HuaweiUpdateApp,
+            ),
+            (
+                b"",
+                "UPDATE.APP",
+                &[] as &[&str],
                 FirmwareKind::HuaweiUpdateApp,
             ),
             (

@@ -7,6 +7,7 @@ use std::path::Path;
 use tracing::{debug, info};
 
 use crate::formats::sparse::unsparse_file;
+use crate::steps::oem::prepare_oem_containers;
 use crate::utils::files::{get_recursive_files_list, move_or_copy};
 use crate::utils::firmware::{
     HeaderKind, ScatterInfo, is_candidate_firmware_path, is_excluded_partition_name,
@@ -31,6 +32,10 @@ pub fn prepare_raw_images(files_path: &Path, raw_images_path: &Path) -> Result<(
 pub fn prepare_images(extracted_archive_path: &Path, raw_images_path: &Path) -> Result<()> {
     // Check for sparsed images
     prepare_sparsed_images(extracted_archive_path)?;
+
+    // OEM containers must be split before the generic firmware/raw-image
+    // passes, which would otherwise treat them as ordinary files.
+    prepare_oem_containers(extracted_archive_path, raw_images_path)?;
 
     // Decompress super.img.lz4 / super.new.dat.br in-place concurrently with partition raw images
     let (_, raw_res) = rayon::join(
