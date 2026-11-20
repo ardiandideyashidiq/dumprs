@@ -9,6 +9,7 @@ mod temp_dir;
 use dumprs::formats::oem::amlogic::extract_amlogic;
 use dumprs::formats::oem::nb0::extract_nb0;
 use dumprs::formats::oem::ofp_mtk::extract_ofp_mtk;
+use dumprs::formats::oem::ofp_qc::extract_ofp_qc;
 use dumprs::formats::oem::ozip::decrypt_ozip;
 use dumprs::formats::oem::pac::extract_pac;
 use dumprs::formats::oem::qfil::extract_qfil;
@@ -638,6 +639,69 @@ fn prepare_oem_containers_extracts_mtk_ofp() {
     prepare_oem_containers(&extracted, &raw).expect("OFP extracted");
 
     assert!(raw.join("system.img").is_file());
+}
+
+// Independent OpenSSL CFB128 vectors for the first published Qualcomm OFP key
+// triple (derived key "d154afeeaafa958f", IV "2c040f5786829207").
+const OFP_QC_XML_HEX: &str = "b67a082cc72a35a4ae1b728b213492263904fb059b79f5f5ab76743193564b86eec7194f60cfbb269dfc8a5cc8207b09b1dd3f67323165fc1f6823294fe62008ab15ff602cb9726085dcf51466bb947b081aea4c72a72ba998621b165a099c96834cc8e9e748b5876f5d71609fd47400cdd6dbfdae170b0957765b2fcedbb79df7c46f5d0b82098b76e53d7780d532c9e1f1476de6067fd2a86f26dbc0b4980a6402da2942ea62e4a2eefd0011a78fd4460cd567d604d3c32e0818b826a064a52140c5cd420bcbff";
+const OFP_QC_IMAGE_HEX: &str = "c80a3f15ef4b1780ed5a28d07a3f872f";
+
+fn from_hex(value: &str) -> Vec<u8> {
+    (0..value.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&value[i..i + 2], 16).expect("hex byte"))
+        .collect()
+}
+
+fn write_qc_ofp(root: &std::path::Path) -> std::path::PathBuf {
+    let xml = from_hex(OFP_QC_XML_HEX);
+    let mut image = vec![0u8; 0x1000];
+    image[0x400..0x410].copy_from_slice(&from_hex(OFP_QC_IMAGE_HEX));
+    image[0x800..0x800 + xml.len()].copy_from_slice(&xml);
+    image[0xe10..0xe14].copy_from_slice(&0x7cefu32.to_le_bytes());
+    image[0xe14..0xe18].copy_from_slice(&4u32.to_le_bytes());
+    image[0xe18..0xe1c].copy_from_slice(&(xml.len() as u32).to_le_bytes());
+    let path = root.join("firmware.ofp");
+    fs::write(&path, image).expect("ofp written");
+    path
+}
+
+/// Regression: a Qualcomm OFP hides an encrypted XML manifest in a page
+/// whose last 0x200-byte page carries the page-size marker and manifest
+/// location; images are then decrypted by their `FileOffsetInSrc` page.
+#[test]
+fn extracts_qualcomm_ofp_firmware() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    let path = write_qc_ofp(&root);
+
+    extract_ofp_qc(&path, &out).expect("Qualcomm OFP extracted");
+
+    assert_eq!(
+        fs::read(out.join("boot.img")).expect("boot.img"),
+        b"BOOTDATA12345678"
+    );
+    assert!(out.join("ProFile.xml").is_file());
+}
+
+/// Regression: DumprX tries the Qualcomm OFP decryptor first and only falls
+/// back to the MediaTek one, so the pipeline must do the same.
+#[test]
+fn prepare_oem_containers_tries_qualcomm_ofp_first() {
+    let root = temp_dir::temp_dir();
+    let extracted = root.join("extracted");
+    let raw = root.join("raw");
+    fs::create_dir_all(&extracted).expect("extracted dir created");
+    fs::create_dir_all(&raw).expect("raw dir created");
+    write_qc_ofp(&extracted);
+
+    prepare_oem_containers(&extracted, &raw).expect("OFP extracted");
+
+    assert_eq!(
+        fs::read(raw.join("boot.img")).expect("boot.img"),
+        b"BOOTDATA12345678"
+    );
 }
 
 /// Side-by-side differential check against the tool this port replaces.

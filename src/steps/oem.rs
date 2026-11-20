@@ -3,11 +3,12 @@
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::formats::oem::amlogic::extract_amlogic;
 use crate::formats::oem::nb0::extract_nb0;
 use crate::formats::oem::ofp_mtk::extract_ofp_mtk;
+use crate::formats::oem::ofp_qc::extract_ofp_qc;
 use crate::formats::oem::pac::extract_pac;
 use crate::formats::oem::qfil::{extract_qfil, list_targets};
 use crate::formats::oem::update_app::extract_update_app;
@@ -45,8 +46,15 @@ pub fn prepare_oem_containers(extracted: &Path, raw_images: &Path) -> Result<()>
             extract_amlogic(&path, raw_images)?;
             let _ = fs::remove_file(&path);
         } else if kind == FirmwareKind::Ofp {
-            info!(file = name, variant = "mtk", "oem.container.detected");
-            extract_ofp_mtk(&path, raw_images)?;
+            // DumprX attempts the Qualcomm variant first, then falls back to
+            // the MediaTek one. Report the QC failure instead of hiding it.
+            if let Err(error) = extract_ofp_qc(&path, raw_images) {
+                warn!(file = name, error = %error, "ofp.qualcomm.failed_trying_mtk");
+                extract_ofp_mtk(&path, raw_images)?;
+                info!(file = name, variant = "mtk", "oem.container.detected");
+            } else {
+                info!(file = name, variant = "qc", "oem.container.detected");
+            }
             let _ = fs::remove_file(&path);
         } else if kind == FirmwareKind::Pac {
             info!(file = name, "oem.container.detected");

@@ -49,6 +49,8 @@ the following work:
 
 ## OEM containers
 
+- `ofp_qc_decrypt.py` by [bkerler](https://github.com/bkerler/oppo_decrypt)
+  (MIT) for the Qualcomm OFP key derivation, page layout and manifest schema.
 - `ofp_mtk_decrypt.py` by [bkerler](https://github.com/bkerler/oppo_decrypt)
   (MIT) for the MediaTek OFP header shuffle and key table.
 - `cfb-mode` (MIT OR Apache-2.0) and `md-5` (MIT OR Apache-2.0) from RustCrypto
