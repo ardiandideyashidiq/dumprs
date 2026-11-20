@@ -780,6 +780,9 @@ fn write_encrypted_ruu(root: &std::path::Path, plain: &[u8]) -> std::path::PathB
     header[8..10].copy_from_slice(&0xa4u16.to_be_bytes());
     header[10] = 1;
     let mut image = header;
+    let mut plain = plain.to_vec();
+    // ruuveal validates the ZIP signature on the first decrypted buffer.
+    plain[0..2].copy_from_slice(b"PK");
     let mut current_iv = iv;
     for block in plain.chunks(0x8000) {
         let mut encrypted = block.to_vec();
@@ -800,7 +803,8 @@ fn write_encrypted_ruu(root: &std::path::Path, plain: &[u8]) -> std::path::PathB
 #[test]
 fn decrypts_htc_ruu_zip() {
     let root = temp_dir::temp_dir();
-    let plain: Vec<u8> = (0..0x10_0000).map(|i| (i % 251) as u8).collect();
+    let mut plain: Vec<u8> = (0..0x10_0000).map(|i| (i % 251) as u8).collect();
+    plain[0..2].copy_from_slice(b"PK");
     let source = write_encrypted_ruu(&root, &plain);
 
     decrypt_ruu_zip(&source, &root.join("decrypted.zip"), "m7_ul").expect("ruu decrypted");
@@ -838,6 +842,157 @@ fn unpack_archive_decrypts_ruu_zip() {
     assert_eq!(
         fs::read(dest.join("boot.img")).expect("boot.img"),
         b"HTC-BOOT"
+    );
+}
+
+fn dumpyara_tool(name: &str) -> Option<std::path::PathBuf> {
+    let path = Path::new("/home/rd/Projects/android/dumpyara/DumprX/utils").join(name);
+    path.is_file().then_some(path)
+}
+
+/// Differential check against DumprX's `nb0-extract` binary.
+#[test]
+#[ignore = "requires the DumprX nb0-extract binary"]
+fn matches_nb0_extract_oracle() {
+    let Some(tool) = dumpyara_tool("nb0-extract") else {
+        println!("check did not run: nb0-extract is missing");
+        return;
+    };
+    let root = temp_dir::temp_dir();
+    let mut image = 1u32.to_le_bytes().to_vec();
+    image.extend(nb0_header(0, 4096, "system"));
+    image.extend(vec![b'A'; 4096]);
+    let source = root.join("firmware.nb0");
+    fs::write(&source, image).expect("nb0 written");
+    let rust_out = root.join("rust");
+    let tool_out = root.join("tool");
+    fs::create_dir_all(&rust_out).expect("rust dir created");
+    fs::create_dir_all(&tool_out).expect("tool dir created");
+
+    extract_nb0(&source, &rust_out).expect("rust extraction succeeded");
+    let status = std::process::Command::new(tool)
+        .arg(&source)
+        .arg(&tool_out)
+        .output()
+        .expect("nb0-extract invoked");
+    assert!(status.status.success(), "nb0-extract failed");
+    assert_eq!(
+        fs::read(rust_out.join("system")).expect("rust image"),
+        fs::read(tool_out.join("system")).expect("tool image")
+    );
+}
+
+/// Differential check against DumprX's `aml-upgrade-package-extract` binary.
+#[test]
+#[ignore = "requires the DumprX aml-upgrade-package-extract binary"]
+fn matches_aml_extract_oracle() {
+    let Some(tool) = dumpyara_tool("aml-upgrade-package-extract") else {
+        println!("check did not run: aml-upgrade-package-extract is missing");
+        return;
+    };
+    let root = temp_dir::temp_dir();
+    let records = aml_record(0x1000, 4096, "img", "system");
+    let image = aml_image(&records, &[(0x1000, b'B', 4096)]);
+    let source = root.join("aml_upgrade_package.img");
+    fs::write(&source, &image).expect("AML image written");
+    let rust_out = root.join("rust");
+    let tool_out = root.join("tool");
+    fs::create_dir_all(&rust_out).expect("rust dir created");
+    fs::create_dir_all(&tool_out).expect("tool dir created");
+    fs::write(tool_out.join("aml_upgrade_package.img"), &image).expect("tool input written");
+
+    extract_amlogic(&source, &rust_out).expect("rust extraction succeeded");
+    let status = std::process::Command::new(tool)
+        .arg("aml_upgrade_package.img")
+        .current_dir(&tool_out)
+        .output()
+        .expect("AML tool invoked");
+    assert!(status.status.success(), "AML tool failed");
+    assert_eq!(
+        fs::read(rust_out.join("system.img")).expect("rust image"),
+        fs::read(tool_out.join("system.img")).expect("tool image")
+    );
+}
+
+/// Differential check against DumprX's `packsparseimg` binary.
+#[test]
+#[ignore = "requires the DumprX packsparseimg binary"]
+fn matches_packsparseimg_oracle() {
+    let Some(tool) = dumpyara_tool("bin/packsparseimg") else {
+        println!("check did not run: packsparseimg is missing");
+        return;
+    };
+    let root = temp_dir::temp_dir();
+    let rust_out = root.join("rust");
+    let tool_out = root.join("tool");
+    fs::create_dir_all(&rust_out).expect("rust dir created");
+    fs::create_dir_all(&tool_out).expect("tool dir created");
+
+    let xml = "<?xml version=\"1.0\"?><data><program SECTOR_SIZE_IN_BYTES=\"512\" file_sector_offset=\"0\" filename=\"chunk_sparse.img\" label=\"system\" num_partition_sectors=\"16\" physical_partition_number=\"0\" size_in_KB=\"8.0\" sparse=\"true\" start_sector=\"0\"/></data>\n";
+    let mut sparse = Vec::new();
+    let payload = vec![b'C'; 8192];
+    sparse.extend_from_slice(&0xed26ff3au32.to_le_bytes());
+    sparse.extend_from_slice(&1u16.to_le_bytes());
+    sparse.extend_from_slice(&0u16.to_le_bytes());
+    sparse.extend_from_slice(&28u16.to_le_bytes());
+    sparse.extend_from_slice(&12u16.to_le_bytes());
+    sparse.extend_from_slice(&4096u32.to_le_bytes());
+    sparse.extend_from_slice(&2u32.to_le_bytes());
+    sparse.extend_from_slice(&1u32.to_le_bytes());
+    sparse.extend_from_slice(&0u32.to_le_bytes());
+    sparse.extend_from_slice(&0xcac1u16.to_le_bytes());
+    sparse.extend_from_slice(&2u16.to_le_bytes());
+    sparse.extend_from_slice(&(12 + payload.len() as u32).to_le_bytes());
+    sparse.extend_from_slice(&0u32.to_le_bytes());
+    sparse.extend_from_slice(&payload);
+
+    for dir in [&rust_out, &tool_out] {
+        fs::write(dir.join("rawprogram_unsparse0.xml"), xml).expect("xml written");
+        fs::write(dir.join("chunk_sparse.img"), &sparse).expect("sparse written");
+    }
+    let xml_path = rust_out.join("rawprogram_unsparse0.xml");
+    extract_qfil(&xml_path, "system", &rust_out).expect("rust extraction succeeded");
+    let status = std::process::Command::new(tool)
+        .arg("-t")
+        .arg("system")
+        .arg("-x")
+        .arg("rawprogram_unsparse0.xml")
+        .current_dir(&tool_out)
+        .output()
+        .expect("packsparseimg invoked");
+    assert!(status.status.success(), "packsparseimg failed");
+    assert_eq!(
+        fs::read(rust_out.join("system.img")).expect("rust image"),
+        fs::read(tool_out.join("system.raw")).expect("tool image")
+    );
+}
+
+/// Differential check against DumprX's `ruuveal` binary.
+#[test]
+#[ignore = "requires the DumprX ruuveal binary"]
+fn matches_ruuveal_oracle() {
+    let Some(tool) = dumpyara_tool("bin/ruuveal") else {
+        println!("check did not run: ruuveal is missing");
+        return;
+    };
+    let root = temp_dir::temp_dir();
+    let plain: Vec<u8> = (0..0x10_0000).map(|i| (i % 251) as u8).collect();
+    let source = write_encrypted_ruu(&root, &plain);
+    let rust_out = root.join("rust.zip");
+    let tool_out = root.join("tool.zip");
+
+    decrypt_ruu_zip(&source, &rust_out, "m7_ul").expect("rust decryption succeeded");
+    let status = std::process::Command::new(tool)
+        .arg("--device")
+        .arg("m7_ul")
+        .arg(&source)
+        .arg(&tool_out)
+        .output()
+        .expect("ruuveal invoked");
+    assert!(status.status.success(), "ruuveal failed");
+    assert_eq!(
+        fs::read(&rust_out).expect("rust output"),
+        fs::read(&tool_out).expect("tool output")
     );
 }
 
