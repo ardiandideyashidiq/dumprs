@@ -106,7 +106,7 @@ pub fn detect_firmware_kind(head: &[u8], filename: &str, members: &[String]) -> 
     if name.starts_with("ruu_") && name.ends_with(".exe") {
         return FirmwareKind::Ruu;
     }
-    if members_match(&lowered, |m| base(m).contains("aml")) {
+    if name.contains("aml") || members_match(&lowered, |m| base(m).contains("aml")) {
         return FirmwareKind::Amlogic;
     }
     if (name.starts_with("rawprogram") && name.ends_with(".xml"))
@@ -725,6 +725,12 @@ mod tests {
                 FirmwareKind::Qfil,
             ),
             (b"", "fw.zip", &["system.pac"], FirmwareKind::Pac),
+            (
+                b"",
+                "aml_upgrade_package.img",
+                &[] as &[&str],
+                FirmwareKind::Amlogic,
+            ),
             (
                 b"",
                 "rawprogram_unsparse0.xml",

@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 use tracing::{debug, info};
 
+use crate::formats::oem::amlogic::extract_amlogic;
 use crate::formats::oem::qfil::{extract_qfil, list_targets};
 use crate::formats::oem::update_app::extract_update_app;
 use crate::utils::firmware::{FirmwareKind, detect_firmware_kind};
@@ -35,6 +36,10 @@ pub fn prepare_oem_containers(extracted: &Path, raw_images: &Path) -> Result<()>
         if kind == FirmwareKind::HuaweiUpdateApp {
             info!(file = name, "oem.container.detected");
             extract_update_app(&path, raw_images)?;
+            let _ = fs::remove_file(&path);
+        } else if kind == FirmwareKind::Amlogic {
+            info!(file = name, "oem.container.detected");
+            extract_amlogic(&path, raw_images)?;
             let _ = fs::remove_file(&path);
         } else if kind == FirmwareKind::Qfil {
             info!(file = name, "oem.container.detected");

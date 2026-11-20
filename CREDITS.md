@@ -51,6 +51,10 @@ the following work:
 
 - `splituapp.py` by SuperR @XDA, as bundled in GPL-3.0-only DumprX, for the
   `UPDATE.APP` entry layout reproduced by `src/formats/oem/update_app.rs`.
+- The AML record layout in `src/formats/oem/amlogic.rs` follows the published
+  `aml-upgrade-package-extract.c` by [Portisch](https://github.com/Portisch/aml-upgrade-package-extract)
+  (no license file in that repository); it was reimplemented in Rust rather
+  than copied.
 - The QFIL `rawprogram*.xml` sector assembly in `src/formats/oem/qfil.rs` was
   inferred from DumprX's `packsparseimg` behaviour and the format's published
   attribute names; no source from that tool is included.

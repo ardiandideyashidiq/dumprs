@@ -6,6 +6,7 @@
 #[path = "common/temp_dir.rs"]
 mod temp_dir;
 
+use dumprs::formats::oem::amlogic::extract_amlogic;
 use dumprs::formats::oem::qfil::extract_qfil;
 use dumprs::formats::oem::update_app::extract_update_app;
 use dumprs::steps::oem::prepare_oem_containers;
@@ -159,6 +160,111 @@ fn prepare_oem_containers_assembles_qfil_partitions() {
     assert_eq!(
         fs::read(raw.join("vendor.img")).expect("vendor.img"),
         vec![b'C'; 4096]
+    );
+}
+
+fn aml_record(offset: u64, size: u64, ext: &str, name: &str) -> Vec<u8> {
+    let mut record = vec![0u8; 0x240];
+    record[0x10..0x14].copy_from_slice(&(offset as u32).to_le_bytes());
+    record[0x18..0x1c].copy_from_slice(&(size as u32).to_le_bytes());
+    record[0x20..0x20 + ext.len()].copy_from_slice(ext.as_bytes());
+    record[0x120..0x120 + name.len()].copy_from_slice(name.as_bytes());
+    record
+}
+
+fn aml_image(header_records: &[u8], data: &[(u64, u8, usize)]) -> Vec<u8> {
+    let mut image = vec![0u8; 0x40];
+    image[0x18] = u8::try_from(header_records.len() / 0x240).unwrap();
+    image.extend_from_slice(header_records);
+    for &(offset, byte, len) in data {
+        let end = (offset as usize).max(image.len()) + len;
+        image.resize(end, 0);
+        image[offset as usize..end].fill(byte);
+    }
+    image
+}
+
+/// Regression: AML records live at 0x40 + n*0x240, with name/extension at
+/// +0x120/+0x20 and a little-endian data offset/size at +0x10/+0x18.
+#[test]
+fn extracts_amlogic_upgrade_package() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    let records = [
+        aml_record(0x1000, 4096, "img", "system"),
+        aml_record(0x2000, 4096, "img", "boot"),
+    ]
+    .concat();
+    let image = aml_image(&records, &[(0x1000, b'A', 4096), (0x2000, b'B', 4096)]);
+    let path = root.join("aml_upgrade_package.img");
+    fs::write(&path, image).expect("AML image written");
+
+    extract_amlogic(&path, &out).expect("AML extracted");
+
+    assert_eq!(
+        fs::read(out.join("system.img")).expect("system"),
+        vec![b'A'; 4096]
+    );
+    assert_eq!(
+        fs::read(out.join("boot.img")).expect("boot"),
+        vec![b'B'; 4096]
+    );
+}
+
+/// Regression: DumprX renames AML `.PARTITION`/`_aml_dtb`/`_a` outputs into
+/// canonical partition names; the Rust port must do the same.
+#[test]
+fn normalizes_amlogic_output_names() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    let records = [
+        aml_record(0x1000, 512, "PARTITION", "vendor"),
+        aml_record(0x2000, 512, "img", "dtb_aml_dtb"),
+        aml_record(0x3000, 512, "img", "recovery_a"),
+    ]
+    .concat();
+    let image = aml_image(
+        &records,
+        &[
+            (0x1000, b'V', 512),
+            (0x2000, b'D', 512),
+            (0x3000, b'R', 512),
+        ],
+    );
+    let path = root.join("aml_upgrade_package.img");
+    fs::write(&path, image).expect("AML image written");
+
+    extract_amlogic(&path, &out).expect("AML extracted");
+
+    assert!(out.join("vendor.img").is_file());
+    assert!(out.join("dtb.img").is_file());
+    assert!(out.join("recovery.img").is_file());
+}
+
+/// Regression: a standalone AML upgrade image must be routed to the AML
+/// parser rather than the generic raw-image pass.
+#[test]
+fn prepare_oem_containers_extracts_amlogic() {
+    let root = temp_dir::temp_dir();
+    let extracted = root.join("extracted");
+    let raw = root.join("raw");
+    fs::create_dir_all(&extracted).expect("extracted dir created");
+    fs::create_dir_all(&raw).expect("raw dir created");
+
+    let records = aml_record(0x1000, 512, "img", "boot");
+    fs::write(
+        extracted.join("aml_upgrade_package.img"),
+        aml_image(&records, &[(0x1000, b'B', 512)]),
+    )
+    .expect("AML image written");
+
+    prepare_oem_containers(&extracted, &raw).expect("AML extracted");
+
+    assert_eq!(
+        fs::read(raw.join("boot.img")).expect("boot.img"),
+        vec![b'B'; 512]
     );
 }
 
