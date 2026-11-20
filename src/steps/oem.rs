@@ -9,6 +9,7 @@ use crate::formats::oem::amlogic::extract_amlogic;
 use crate::formats::oem::nb0::extract_nb0;
 use crate::formats::oem::ofp_mtk::extract_ofp_mtk;
 use crate::formats::oem::ofp_qc::extract_ofp_qc;
+use crate::formats::oem::ops::extract_ops;
 use crate::formats::oem::pac::extract_pac;
 use crate::formats::oem::qfil::{extract_qfil, list_targets};
 use crate::formats::oem::update_app::extract_update_app;
@@ -55,6 +56,10 @@ pub fn prepare_oem_containers(extracted: &Path, raw_images: &Path) -> Result<()>
             } else {
                 info!(file = name, variant = "qc", "oem.container.detected");
             }
+            let _ = fs::remove_file(&path);
+        } else if kind == FirmwareKind::Ops {
+            info!(file = name, "oem.container.detected");
+            extract_ops(&path, raw_images)?;
             let _ = fs::remove_file(&path);
         } else if kind == FirmwareKind::Pac {
             info!(file = name, "oem.container.detected");

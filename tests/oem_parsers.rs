@@ -10,6 +10,7 @@ use dumprs::formats::oem::amlogic::extract_amlogic;
 use dumprs::formats::oem::nb0::extract_nb0;
 use dumprs::formats::oem::ofp_mtk::extract_ofp_mtk;
 use dumprs::formats::oem::ofp_qc::extract_ofp_qc;
+use dumprs::formats::oem::ops::extract_ops;
 use dumprs::formats::oem::ozip::decrypt_ozip;
 use dumprs::formats::oem::pac::extract_pac;
 use dumprs::formats::oem::qfil::extract_qfil;
@@ -697,6 +698,62 @@ fn prepare_oem_containers_tries_qualcomm_ofp_first() {
     write_qc_ofp(&extracted);
 
     prepare_oem_containers(&extracted, &raw).expect("OFP extracted");
+
+    assert_eq!(
+        fs::read(raw.join("boot.img")).expect("boot.img"),
+        b"BOOTDATA12345678"
+    );
+}
+
+/// Regression: a OnePlus .ops hides an encrypted settings.xml in the page
+/// before the trailing header, and the manifest's SAHARA entries are
+/// encrypted while Program/UFS entries are copied verbatim.
+#[test]
+fn extracts_oneplus_ops_recorded_corpus() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    let source = root.join("firmware.ops");
+    fs::write(&source, include_bytes!("fixtures/ops_minimal.ops")).expect("fixture written");
+
+    extract_ops(&source, &out).expect("ops extracted");
+
+    assert_eq!(
+        fs::read(out.join("boot.img")).expect("boot.img"),
+        b"BOOTDATA12345678"
+    );
+    assert!(out.join("settings.xml").is_file());
+}
+
+/// Regression: a truncated .ops header must be reported rather than read
+/// from an arbitrary offset.
+#[test]
+fn rejects_truncated_ops_header() {
+    let root = temp_dir::temp_dir();
+    let out = root.join("out");
+    fs::create_dir_all(&out).expect("output dir created");
+    let source = root.join("firmware.ops");
+    fs::write(&source, [0u8; 16]).expect("fixture written");
+
+    assert!(extract_ops(&source, &out).is_err());
+}
+
+/// Regression: a `.ops` found after archive extraction must be routed to the
+/// OPS decryptor instead of the generic firmware pass.
+#[test]
+fn prepare_oem_containers_extracts_ops() {
+    let root = temp_dir::temp_dir();
+    let extracted = root.join("extracted");
+    let raw = root.join("raw");
+    fs::create_dir_all(&extracted).expect("extracted dir created");
+    fs::create_dir_all(&raw).expect("raw dir created");
+    fs::write(
+        extracted.join("firmware.ops"),
+        include_bytes!("fixtures/ops_minimal.ops"),
+    )
+    .expect("ops fixture written");
+
+    prepare_oem_containers(&extracted, &raw).expect("ops extracted");
 
     assert_eq!(
         fs::read(raw.join("boot.img")).expect("boot.img"),
